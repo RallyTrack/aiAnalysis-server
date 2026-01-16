@@ -1,0 +1,25 @@
+# Python compiled files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual Environments
+venv/
+env/
+.venv/
+.env
+
+# Distribution / Packaging
+build/
+dist/
+*.egg-info/
+
+# PyCharm / VS Code
+.idea/
+.vscode/
+
+# Mac
+.DS_Store
+
+# Logs
+*.log
