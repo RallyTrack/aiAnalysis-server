@@ -23,3 +23,9 @@ dist/
 
 # Logs
 *.log
+
+# 모델 가중치 (Git LFS 또는 S3에서 관리)
+weights/*.pth
+
+# 임시 영상 파일
+temp_videos/

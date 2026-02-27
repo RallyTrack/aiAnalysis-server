@@ -1,2 +1,10 @@
 fastapi
 uvicorn
+httpx
+torch
+torchvision
+mediapipe==0.10.14
+opencv-python
+numpy
+pandas
+scikit-learn
