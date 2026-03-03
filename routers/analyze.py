@@ -9,10 +9,11 @@ from pydantic import BaseModel
 
 from config.settings import BACKEND_URL
 from services.video_service import download_video, cleanup_video
-from services.pose_service import detect_impacts, extract_player_positions
+from services.pose_service import detect_impacts, extract_player_positions, extract_landing_points
 from services.stroke_service import classify_strokes_stgcn
+from services.court_service import CourtDetector, detect_court_yolo
 from services.heatmap_service import generate_heatmap
-from services.score_service import calculate_score, generate_timeline_events
+from services.score_service import judge_rallies, calculate_score, calculate_score_simple, generate_timeline_events
 from services.feedback_service import generate_feedback, generate_ability_metrics
 
 router = APIRouter()
@@ -39,12 +40,14 @@ def run_analysis(video_id: int, s3_url: str):
     실제 분석 파이프라인.
 
     1. S3에서 영상 다운로드
-    2. MediaPipe로 관절 추출 + 임팩트 감지
-    3. ST-GCN으로 스트로크 분류
-    4. 히트맵 데이터 생성
-    5. 점수 계산 + 타임라인 생성
-    6. AI 피드백 생성
-    7. 백엔드 콜백
+    2. YOLO로 코트 라인 감지
+    3. MediaPipe로 관절 추출 + 임팩트 감지
+    4. ST-GCN으로 스트로크 분류
+    5. 셔틀콕 낙하지점 추정 + in/out 판정
+    6. 점수 계산 + 타임라인 생성
+    7. 히트맵 데이터 생성
+    8. AI 피드백 생성
+    9. 백엔드 콜백
     """
     local_path = None
 
@@ -54,29 +57,43 @@ def run_analysis(video_id: int, s3_url: str):
         # 1. S3에서 영상 다운로드
         local_path = download_video(s3_url)
 
-        # 2. MediaPipe로 관절 추출 + 임팩트 감지
+        # 2. YOLO로 코트 라인 감지 (실패 시 기본 코트 사용)
+        court_corners = detect_court_yolo(local_path)
+        court_detector = CourtDetector(court_corners=court_corners, mode="singles")
+
+        # 3. MediaPipe로 관절 추출 + 임팩트 감지
         sequences, timestamps = detect_impacts(local_path)
 
-        # 3. ST-GCN으로 스트로크 분류
+        # 4. ST-GCN으로 스트로크 분류
         if len(sequences) > 0:
             stroke_results = classify_strokes_stgcn(sequences)
         else:
             stroke_results = []
             print(f"[경고] videoId={video_id}: 임팩트 감지 실패, 빈 결과 반환")
 
-        # 4. 선수 위치 추출 + 히트맵 생성
+        # 5. 셔틀콕 낙하지점 추정 + in/out 판정 + 점수 계산
+        if len(sequences) > 0 and stroke_results:
+            landing_points = extract_landing_points(sequences, timestamps)
+            rally_results = judge_rallies(stroke_results, timestamps, landing_points, court_detector)
+            score = calculate_score(rally_results)
+            timeline_events = generate_timeline_events(score["rallyDetails"])
+        else:
+            score = calculate_score_simple(stroke_results, timestamps)
+            timeline_events = [{
+                "timestamp": 0, "displayTime": "0:00",
+                "eventType": "GAME_START", "eventTitle": "경기 시작",
+                "eventDescription": "분석 시작", "eventScore": "0:0",
+            }]
+
+        # 6. 선수 위치 추출 + 히트맵 생성
         positions = extract_player_positions(local_path)
         heatmap_data = generate_heatmap(positions)
 
-        # 5. 점수 계산 + 타임라인 생성
-        score = calculate_score(stroke_results, timestamps)
-        timeline_events = generate_timeline_events(stroke_results, timestamps)
-
-        # 6. AI 피드백 + 능력치 생성
+        # 7. AI 피드백 + 능력치 생성
         feedback = generate_feedback(stroke_results, score)
         ability_metrics = generate_ability_metrics(stroke_results, score)
 
-        # 7. 스트로크 분포 집계
+        # 8. 스트로크 분포 집계
         stroke_types = {}
         for result in stroke_results:
             label = result["label"].lower()
@@ -97,7 +114,7 @@ def run_analysis(video_id: int, s3_url: str):
             "timelineEvents": timeline_events,
         }
 
-        # 백엔드 콜백 호출
+        # 9. 백엔드 콜백 호출
         response = httpx.post(
             f"{BACKEND_URL}/api/v1/analysis/complete",
             json=callback_data,
@@ -107,16 +124,9 @@ def run_analysis(video_id: int, s3_url: str):
 
     except Exception as e:
         print(f"[분석 실패] videoId={video_id}, error={e}")
-
-        # 실패 시에도 콜백을 보내 상태를 FAILED로 변경할 수 있도록 함
-        # TODO: 백엔드에 실패 콜백 엔드포인트 추가 시 활성화
-        # try:
-        #     httpx.post(f"{BACKEND_URL}/api/v1/analysis/failed",
-        #                json={"videoId": video_id, "error": str(e)}, timeout=10.0)
-        # except:
-        #     pass
+        import traceback
+        traceback.print_exc()
 
     finally:
-        # 임시 영상 파일 삭제
         if local_path:
             cleanup_video(local_path)

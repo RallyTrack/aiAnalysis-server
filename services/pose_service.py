@@ -139,3 +139,46 @@ def extract_player_positions(video_path: str) -> list:
 
     print(f"[위치 추출 완료] {len(positions)}개 프레임")
     return positions
+
+
+def extract_landing_points(sequences: np.ndarray, timestamps: list) -> list:
+    """
+    임팩트 시퀀스에서 셔틀콕 낙하지점을 추정한다.
+
+    현재는 임팩트 직후 손목 좌표의 이동 방향으로 낙하 예상 지점을 추정.
+    추후 셔틀콕 트래킹 모델(YOLO)로 교체 예정.
+
+    Args:
+        sequences: (N, 30, 33, 3) 관절 시퀀스
+        timestamps: 각 임팩트 발생 시각(초)
+
+    Returns:
+        [{"x": float, "y": float}, ...] 정규화 좌표 (0~1)
+    """
+    landing_points = []
+
+    for seq in sequences:
+        # seq shape: (30, 33, 3) → 30프레임, 33관절, xyz
+        # 임팩트 시점 = 15번째 프레임 (중앙)
+        impact_frame = seq[15]
+        post_frame = seq[min(20, len(seq) - 1)]  # 임팩트 후 5프레임
+
+        # 손목 좌표 (landmark 15=왼손목, 16=오른손목)
+        wrist_at_impact = (impact_frame[15][:2] + impact_frame[16][:2]) / 2
+        wrist_after = (post_frame[15][:2] + post_frame[16][:2]) / 2
+
+        # 스윙 방향 벡터
+        direction = wrist_after - wrist_at_impact
+
+        # 낙하 예상 지점 = 임팩트 위치 + 방향 * 스케일
+        # 실제로는 셔틀콕 궤적 추적이 필요하지만 현재는 추정
+        landing = wrist_at_impact + direction * 3.0
+
+        # 0~1 범위로 클램핑
+        landing_x = float(np.clip(landing[0], 0, 1))
+        landing_y = float(np.clip(landing[1], 0, 1))
+
+        landing_points.append({"x": landing_x, "y": landing_y})
+
+    print(f"[낙하지점 추정] {len(landing_points)}개 포인트")
+    return landing_points
