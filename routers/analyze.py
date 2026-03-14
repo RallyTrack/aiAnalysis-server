@@ -22,20 +22,23 @@ router = APIRouter()
 class AnalyzeRequest(BaseModel):
     videoId: int
     s3Url: str
+    skeletonUploadUrl: str
+    skeletonVideoUrl: str
 
 
 @router.post("/analyze")
 def analyze_video(request: AnalyzeRequest, background_tasks: BackgroundTasks):
-    """
+    '''
     백엔드에서 영상 업로드 후 호출하는 엔드포인트.
     분석 작업을 백그라운드로 실행하고 즉시 응답을 반환한다.
-    """
+    '''
     print(f"[분석 요청 수신] videoId={request.videoId}, s3Url={request.s3Url}")
-    background_tasks.add_task(run_analysis, request.videoId, request.s3Url)
+    background_tasks.add_task(run_analysis, request.videoId, request.s3Url,
+                              request.skeletonUploadUrl, request.skeletonVideoUrl)
     return {"message": "분석이 시작되었습니다.", "videoId": request.videoId}
 
 
-def run_analysis(video_id: int, s3_url: str):
+def run_analysis(video_id: int, s3_url: str, skeleton_upload_url: str, skeleton_video_url: str):
     """
     실제 분석 파이프라인.
 
@@ -99,6 +102,10 @@ def run_analysis(video_id: int, s3_url: str):
             label = result["label"].lower()
             stroke_types[label] = stroke_types.get(label, 0) + 1
 
+        import httpx
+        with open(local_path, "rb") as f:
+            httpx.put(skeleton_upload_url, content=f.read(), headers={'Content-Type': "video/mp4"}, timeout=30.0)
+
         # 콜백 데이터 구성
         callback_data = {
             "videoId": video_id,
@@ -112,6 +119,7 @@ def run_analysis(video_id: int, s3_url: str):
             "abilityMetrics": json.dumps(ability_metrics),
             "aiFeedback": feedback,
             "timelineEvents": timeline_events,
+            "skeletonVideoUrl": skeleton_video_url,
         }
 
         # 9. 백엔드 콜백 호출
