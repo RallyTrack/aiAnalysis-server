@@ -26,6 +26,7 @@ TrackNetV3: TrackNetV3/ckpts/ 폴더 내에 학습된 가중치 파일(예: Trac
 YOLOv8-pose: 실행 시 자동 다운로드되거나, 최상위 경로에 yolov8n-pose.pt 파일을 배치합니다.
 
 🏗️ 프로젝트 구조 (Directory Structure)
+```
 Plaintext
 aiAnalysis-server/
 ├── TrackNetV3/            # 셔틀콕 추적 엔진
@@ -39,6 +40,7 @@ aiAnalysis-server/
 ├── HIt2.ipynb             # 물리 엔진 기반 타점 탐지 및 임팩트 효과 합성
 ├── .gitignore             # 대용량 파일 업로드 방지 설정
 └── README.md
+```
 
 🚀 주요 기능 (Key Features)
 
