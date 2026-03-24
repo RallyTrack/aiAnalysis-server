@@ -1,22 +1,13 @@
 """
-RallyTrack - 미니맵 렌더러 모듈
+RallyTrack - 미니맵 렌더러 모듈 (개선판)
 
-역할:
-  - 매 프레임마다 미니맵 캔버스를 생성하고 요소를 그립니다.
-    · 셔틀콕 궤적
-    · 선수 위치 (스켈레톤 투영)
-    · 선수 동선(경로) 라인
-    · 타점 마커 (번호 포함)
-
-[원본 대비 주요 수정 사항]
-  1. 선수 발목 중심→미니맵 변환 후 코트 내부 여부를 
-     src_pts(영상 좌표)로 체크 → 미니맵 좌표로 체크하도록 수정
-     (원본: pointPolygonTest에 shifted_dst_pts를 쓰면서 동시에
-      영상 좌표를 넘기는 혼용이 있었음)
-  2. 선수 경로를 deque 없이 계속 누적했는데 긴 경기에서 메모리 낭비
-     → maxlen 제한 있는 deque로 교체
-  3. hit_draw_data를 매 프레임 반복 순회 → 타점이 많을수록 느려짐
-     → 타점 인덱스 집합으로 미리 저장해 O(1) 조회로 개선
+변경 사항:
+  1. 스켈레톤 렌더러 제거 (Top-Down 뷰에 스켈레톤은 부적합)
+  2. 셔틀콕 궤적 유지 (선택적 표시)
+  3. 선수 경로 + 현재 위치 도트만 표시 (깔끔)
+  4. 타점 마커: 번호 + 색상 (선수 구분)
+  5. 선수 위치 히스토리를 PlayerTracker에서 관리
+     → 타점 선수 판별을 impact.py의 owner 기반으로만 받아서 사용
 """
 
 from __future__ import annotations
@@ -24,7 +15,7 @@ from __future__ import annotations
 import cv2
 import numpy as np
 from collections import deque
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Dict
 
 from .config import MINIMAP_CONFIG, POSE_CONFIG, SKELETON_EDGES
 from .court import (
@@ -48,24 +39,16 @@ class ShuttleTrailRenderer:
         self._trail: deque[Tuple[int, int]] = deque(maxlen=trail_length)
         self._color = MINIMAP_CONFIG["shuttle_color"]
 
-    def update(
-        self,
-        x: float,
-        y: float,
-        to_minimap_matrix: np.ndarray,
-    ) -> None:
-        """유효한 좌표(>0)이면 미니맵 좌표로 변환 후 궤적에 추가합니다."""
+    def update(self, x: float, y: float, to_minimap_matrix: np.ndarray) -> None:
         if x > 0 and y > 0:
             mx, my = frame_to_minimap((x, y), to_minimap_matrix)
             self._trail.append((mx, my))
 
     def draw(self, canvas: np.ndarray) -> None:
-        """궤적을 캔버스에 그립니다. 최신일수록 크고 밝게 표시합니다."""
         n = len(self._trail)
         if n == 0:
             return
         for i, (mx, my) in enumerate(self._trail):
-            # 오래된 점: 작고 어둡게 / 최신 점: 크고 밝게
             alpha  = (i + 1) / n
             radius = max(2, int(3 + 5 * alpha))
             color  = tuple(int(c * alpha) for c in self._color)
@@ -73,52 +56,47 @@ class ShuttleTrailRenderer:
 
 
 # ────────────────────────────────────────────────────────────
-# 선수 경로 렌더러
+# 선수 위치 트래커
 # ────────────────────────────────────────────────────────────
 
-class PlayerPathRenderer:
-    """선수 발 위치를 미니맵에 경로 라인으로 그립니다."""
+class PlayerTracker:
+    """
+    선수 발 위치를 추적하고 Top/Bottom을 분류합니다.
 
-    # 최근 N개 위치만 유지 (너무 긴 경로는 오히려 가독성 저하)
+    - 미니맵 좌표계에서 네트 Y 기준으로 분류
+    - 경로(polyline) + 현재 위치 도트 렌더링
+    - 타점 마커를 위한 마지막 위치 제공
+    """
+
     MAX_PATH_LEN = 300
 
     def __init__(self):
-        self._top_path: deque[Tuple[int, int]]    = deque(maxlen=self.MAX_PATH_LEN)
+        self._top_path:    deque[Tuple[int, int]] = deque(maxlen=self.MAX_PATH_LEN)
         self._bottom_path: deque[Tuple[int, int]] = deque(maxlen=self.MAX_PATH_LEN)
         self._top_color    = MINIMAP_CONFIG["top_color"]
         self._bottom_color = MINIMAP_CONFIG["bottom_color"]
 
-        # 마지막으로 알려진 위치 (타점 마커에 선수 위치 대입할 때 사용)
         self.last_top_pos:    Optional[Tuple[int, int]] = None
         self.last_bottom_pos: Optional[Tuple[int, int]] = None
 
     def update(
         self,
-        keypoints_list: list,            # YOLOv8 검출된 사람별 키포인트 배열
-        to_minimap_matrix:    np.ndarray,
-        minimap_pts:          np.ndarray,
-        net_y_minimap:        float,
-        to_normalized_matrix: np.ndarray,
+        keypoints_list:    list,
+        to_minimap_matrix: np.ndarray,
+        minimap_pts:       np.ndarray,
+        net_y_minimap:     float,
     ) -> None:
         """
-        검출된 사람 키포인트를 미니맵에 투영하고 경로를 업데이트합니다.
-
-        Args:
-            keypoints_list     : person별 keypoints 배열 [(17, 3), ...]
-            to_minimap_matrix  : 영상 → 미니맵 변환 행렬
-            minimap_pts        : 미니맵 내 코트 코너 좌표
-            net_y_minimap      : 미니맵 내 네트 Y 좌표
-            to_normalized_matrix: 영상 → [0,1]² 변환 행렬 (경로 저장용)
+        키포인트에서 발 위치를 추출하여 경로에 추가합니다.
+        코트 내부에 있는 선수만 추적합니다.
         """
         for person in keypoints_list:
             foot_x, foot_y = self._get_foot_center(person)
             if foot_x <= 0 or foot_y <= 0:
                 continue
 
-            # 미니맵 좌표로 변환
             mx, my = frame_to_minimap((foot_x, foot_y), to_minimap_matrix)
 
-            # 코트 내부 여부 확인 (미니맵 좌표 기준)
             if not is_inside_court((mx, my), minimap_pts):
                 continue
 
@@ -131,24 +109,21 @@ class PlayerPathRenderer:
 
     def draw(self, canvas: np.ndarray) -> None:
         """경로 라인과 현재 위치 마커를 그립니다."""
-        # 경로 라인
         self._draw_path(canvas, self._top_path,    self._top_color)
         self._draw_path(canvas, self._bottom_path, self._bottom_color)
 
-        # 현재 위치 마커
         if self.last_top_pos:
             self._draw_player_dot(canvas, self.last_top_pos, self._top_color)
         if self.last_bottom_pos:
             self._draw_player_dot(canvas, self.last_bottom_pos, self._bottom_color)
 
     @staticmethod
-    def _get_foot_center(person: np.ndarray) -> Tuple[float, float]:
-        """
-        양 발목(왼쪽=15, 오른쪽=16) 평균을 선수 위치로 사용합니다.
-        한쪽 발목만 가시적이면 그 발목을 사용합니다.
-        """
-        l_x, l_y, l_c = person[15]
-        r_x, r_y, r_c = person[16]
+    def _get_foot_center(person: list) -> Tuple[float, float]:
+        """양 발목(15, 16) 평균 → 선수 위치."""
+        if len(person) < 17:
+            return 0.0, 0.0
+        l_x, l_y, l_c = person[15][0], person[15][1], person[15][2]
+        r_x, r_y, r_c = person[16][0], person[16][1], person[16][2]
         kconf = POSE_CONFIG["keypoint_conf"]
 
         if l_c >= kconf and r_c >= kconf:
@@ -160,82 +135,17 @@ class PlayerPathRenderer:
         return 0.0, 0.0
 
     @staticmethod
-    def _draw_path(
-        canvas: np.ndarray,
-        path:   deque,
-        color:  Tuple,
-    ) -> None:
+    def _draw_path(canvas: np.ndarray, path: deque, color: Tuple) -> None:
         if len(path) < 2:
             return
         pts = np.array(list(path), dtype=np.int32).reshape(-1, 1, 2)
         cv2.polylines(canvas, [pts], isClosed=False, color=color, thickness=2)
 
     @staticmethod
-    def _draw_player_dot(
-        canvas: np.ndarray,
-        pos:    Tuple[int, int],
-        color:  Tuple,
-    ) -> None:
-        cv2.circle(canvas, pos, 8, color,        -1)
-        cv2.circle(canvas, pos, 8, (255,255,255), 1)
-
-
-# ────────────────────────────────────────────────────────────
-# 스켈레톤 렌더러 (미니맵용)
-# ────────────────────────────────────────────────────────────
-
-class SkeletonMinimapRenderer:
-    """
-    선수의 스켈레톤을 미니맵에 투영하여 그립니다.
-    미니맵은 Top-Down 뷰이므로 발 위치를 기준점으로 사용하고
-    상대 좌표로 팔다리를 그립니다.
-    """
-
-    def draw(
-        self,
-        canvas:           np.ndarray,
-        keypoints_list:   list,
-        to_minimap_matrix: np.ndarray,
-        minimap_pts:      np.ndarray,
-        net_y_minimap:    float,
-    ) -> None:
-        cfg   = POSE_CONFIG
-        edges = SKELETON_EDGES   # (1-indexed) 쌍
-
-        for person in keypoints_list:
-            foot_x, foot_y = PlayerPathRenderer._get_foot_center(person)
-            if foot_x <= 0 or foot_y <= 0:
-                continue
-
-            tx, ty = frame_to_minimap((foot_x, foot_y), to_minimap_matrix)
-            if not is_inside_court((tx, ty), minimap_pts):
-                continue
-
-            color = (
-                MINIMAP_CONFIG["top_color"]
-                if ty < net_y_minimap
-                else MINIMAP_CONFIG["bottom_color"]
-            )
-
-            # 뼈대 그리기 (1-indexed → 0-indexed)
-            for p1_i, p2_i in edges:
-                p1 = person[p1_i - 1]
-                p2 = person[p2_i - 1]
-                if p1[2] < cfg["keypoint_conf"] or p2[2] < cfg["keypoint_conf"]:
-                    continue
-                x1 = int(tx + (p1[0] - foot_x) * cfg["scale"])
-                y1 = int(ty + (p1[1] - foot_y) * cfg["scale"])
-                x2 = int(tx + (p2[0] - foot_x) * cfg["scale"])
-                y2 = int(ty + (p2[1] - foot_y) * cfg["scale"])
-                cv2.line(canvas, (x1, y1), (x2, y2), color, cfg["bone_thickness"])
-
-            # 머리 (Nose = 인덱스 0)
-            if person[0][2] >= cfg["keypoint_conf"]:
-                hx = int(tx + (person[0][0] - foot_x) * cfg["scale"])
-                hy = int(ty + (person[0][1] - foot_y) * cfg["scale"])
-                r  = cfg["head_radius"]
-                cv2.circle(canvas, (hx, hy), r, color,        -1)
-                cv2.circle(canvas, (hx, hy), r, (255,255,255), 2)
+    def _draw_player_dot(canvas: np.ndarray, pos: Tuple[int, int], color: Tuple) -> None:
+        cv2.circle(canvas, pos, 9,  color,        -1)
+        cv2.circle(canvas, pos, 9,  (255,255,255), 2)
+        cv2.circle(canvas, pos, 4,  (255,255,255), -1)
 
 
 # ────────────────────────────────────────────────────────────
@@ -244,32 +154,29 @@ class SkeletonMinimapRenderer:
 
 class HitMarkerRenderer:
     """
-    타점 이벤트를 미니맵에 영구적으로 표시합니다.
-    번호가 붙은 원형 마커 형태입니다.
+    타점 이벤트를 미니맵에 번호 마커로 영구 표시합니다.
+
+    [개선]
+    - 선수 위치(발 중심)를 우선 사용, 없으면 셔틀콕 위치 폴백
+    - 마커 크기/폰트 최적화
     """
 
     def __init__(self):
-        # {frame: (minimap_x, minimap_y, event)} 저장
-        self._markers: dict[int, Tuple[int, int, ImpactEvent]] = {}
+        # frame → (mx, my, event, color)
+        self._markers: Dict[int, Tuple[int, int, ImpactEvent, Tuple]] = {}
         self._radius = MINIMAP_CONFIG["hit_radius"]
 
     def register(
         self,
-        event:           ImpactEvent,
-        shuttle_x:       float,
-        shuttle_y:       float,
-        player_path_renderer: PlayerPathRenderer,
-        to_normalized_matrix: np.ndarray,
+        event:          ImpactEvent,
+        shuttle_x:      float,
+        shuttle_y:      float,
+        player_tracker: PlayerTracker,
+        to_minimap_matrix: np.ndarray,
     ) -> None:
         """
-        타점 이벤트를 등록합니다.
-        선수 위치(발 중심) → 없으면 셔틀콕 위치를 대신 사용합니다.
-
-        [수정 이유]
-        원본은 셔틀콕 좌표를 정규화 → 미니맵으로 변환해
-        타점 마커를 셔틀콕 위치에 그렸습니다.
-        타구 직후 셔틀콕은 이미 이동해 있어 선수 위치와 다릅니다.
-        실제 타구 위치는 선수의 발 중심 근처이므로 선수 위치를 우선합니다.
+        타점 이벤트 등록.
+        event.owner("top"/"bottom") 기반으로 선수 위치를 결정합니다.
         """
         color = (
             MINIMAP_CONFIG["top_color"]
@@ -277,37 +184,36 @@ class HitMarkerRenderer:
             else MINIMAP_CONFIG["bottom_color"]
         )
 
-        # 선수 위치 우선
-        if event.owner == "top" and player_path_renderer.last_top_pos:
-            mx, my = player_path_renderer.last_top_pos
-        elif event.owner == "bottom" and player_path_renderer.last_bottom_pos:
-            mx, my = player_path_renderer.last_bottom_pos
+        # 선수 발 위치 우선
+        if event.owner == "top" and player_tracker.last_top_pos:
+            mx, my = player_tracker.last_top_pos
+        elif event.owner == "bottom" and player_tracker.last_bottom_pos:
+            mx, my = player_tracker.last_bottom_pos
         elif shuttle_x > 0 and shuttle_y > 0:
-            # 셔틀콕 정규화 → 미니맵 좌표 폴백
-            nx, ny = frame_to_normalized((shuttle_x, shuttle_y), to_normalized_matrix)
-            mx, my = normalized_to_minimap(nx, ny)
+            # 셔틀콕 미니맵 좌표 폴백
+            mx, my = frame_to_minimap((shuttle_x, shuttle_y), to_minimap_matrix)
         else:
             return
 
         self._markers[event.frame] = (mx, my, event, color)
 
     def draw(self, canvas: np.ndarray) -> None:
-        """등록된 모든 타점 마커를 캔버스에 그립니다."""
         for mx, my, event, color in self._markers.values():
             r = self._radius
-            cv2.circle(canvas, (mx, my), r, color,        -1)
-            cv2.circle(canvas, (mx, my), r, (255,255,255), 2)
+            # 외곽 원
+            cv2.circle(canvas, (mx, my), r,     color,        -1)
+            cv2.circle(canvas, (mx, my), r,     (255,255,255), 2)
 
-            text  = str(event.hit_number)
-            font  = cv2.FONT_HERSHEY_SIMPLEX
-            scale = 0.45
-            thick = 1
+            # 번호 텍스트
+            text   = str(event.hit_number)
+            font   = cv2.FONT_HERSHEY_SIMPLEX
+            scale  = 0.45
+            thick  = 1
             tw, th = cv2.getTextSize(text, font, scale, thick)[0]
             cv2.putText(
                 canvas, text,
                 (mx - tw // 2, my + th // 2),
-                font, scale, (255, 255, 255), thick,
-                cv2.LINE_AA,
+                font, scale, (255, 255, 255), thick, cv2.LINE_AA,
             )
 
 
@@ -317,13 +223,18 @@ class HitMarkerRenderer:
 
 class MinimapRenderer:
     """
-    모든 미니맵 요소를 통합 관리하는 파사드(Facade) 클래스.
+    미니맵 요소를 통합 관리하는 파사드(Facade) 클래스.
+
+    [변경 사항]
+    - SkeletonMinimapRenderer 제거 (Top-Down 뷰에 스켈레톤 부적합)
+    - PlayerPathRenderer → PlayerTracker로 리팩터링
+    - ShuttleTrailRenderer 유지 (선택적)
+    - HitMarkerRenderer: owner 기반 선수 분류 사용
 
     Usage:
         renderer = MinimapRenderer(homographies, hit_events)
         for frame_idx, frame in enumerate(frames):
-            canvas = renderer.render_frame(frame_idx, shuttle_x, shuttle_y, keypoints_list)
-            # canvas: (H, W, 3) uint8 minimap image
+            canvas = renderer.render_frame(frame_idx, sx, sy, keypoints_list)
     """
 
     def __init__(
@@ -331,12 +242,11 @@ class MinimapRenderer:
         homographies: dict,
         hit_events:   List[ImpactEvent],
     ):
-        self._hg  = homographies
+        self._hg         = homographies
         self._hit_lookup = build_hit_lookup(hit_events)
 
-        self._shuttle  = ShuttleTrailRenderer()
-        self._player   = PlayerPathRenderer()
-        self._skeleton = SkeletonMinimapRenderer()
+        self._shuttle    = ShuttleTrailRenderer()
+        self._player     = PlayerTracker()
         self._hit_marker = HitMarkerRenderer()
 
     def render_frame(
@@ -349,30 +259,29 @@ class MinimapRenderer:
         """
         한 프레임의 미니맵을 렌더링하여 반환합니다.
 
-        Args:
-            frame_idx      : 현재 프레임 번호
-            shuttle_x/y    : 셔틀콕 좌표 (비가시이면 0)
-            keypoints_list : YOLOv8 검출 결과 (person별 17×3 배열)
-
-        Returns:
-            (H, W, 3) uint8 미니맵 이미지
+        렌더링 순서:
+          1. 코트 배경 (create_minimap_canvas)
+          2. 셔틀콕 궤적
+          3. 선수 경로 라인
+          4. 타점 번호 마커
+          5. 선수 현재 위치 도트 (가장 위에 표시)
         """
-        hg = self._hg
+        hg     = self._hg
         canvas = create_minimap_canvas()
 
-        # 1. 선수 경로 & 스켈레톤 업데이트
+        # ── 업데이트 ──────────────────────────────────────
+        # 선수 위치 추적 (키포인트 → 미니맵 좌표 변환)
         self._player.update(
             keypoints_list,
             hg["to_minimap"],
             hg["minimap_pts"],
             hg["net_y_minimap"],
-            hg["to_normalized"],
         )
 
-        # 2. 셔틀콕 궤적 업데이트
+        # 셔틀콕 궤적 추적
         self._shuttle.update(shuttle_x, shuttle_y, hg["to_minimap"])
 
-        # 3. 타점 이벤트 등록 (해당 프레임이면)
+        # 타점 이벤트 등록 (해당 프레임이면)
         if frame_idx in self._hit_lookup:
             event = self._hit_lookup[frame_idx]
             self._hit_marker.register(
@@ -380,19 +289,40 @@ class MinimapRenderer:
                 shuttle_x,
                 shuttle_y,
                 self._player,
-                hg["to_normalized"],
+                hg["to_minimap"],
             )
 
-        # 4. 그리기 순서: 경로 → 셔틀 → 타점 마커 → 스켈레톤 → 현재 선수 위치
+        # ── 렌더링 순서 ───────────────────────────────────
+        # 1. 셔틀콕 궤적 (배경 바로 위)
         self._shuttle.draw(canvas)
-        self._player.draw(canvas)   # draw()에서 경로 + 현재 위치 모두 그림
+
+        # 2. 선수 경로 라인
+        self._draw_paths_only(canvas)
+
+        # 3. 타점 번호 마커 (경로 위에)
         self._hit_marker.draw(canvas)
-        self._skeleton.draw(
-            canvas,
-            keypoints_list,
-            hg["to_minimap"],
-            hg["minimap_pts"],
-            hg["net_y_minimap"],
-        )
+
+        # 4. 선수 현재 위치 도트 (최상단 레이어)
+        self._draw_player_dots(canvas)
 
         return canvas
+
+    def _draw_paths_only(self, canvas: np.ndarray) -> None:
+        """선수 경로 라인만 그립니다 (현재 위치 도트 제외)."""
+        PlayerTracker._draw_path(
+            canvas, self._player._top_path, self._player._top_color
+        )
+        PlayerTracker._draw_path(
+            canvas, self._player._bottom_path, self._player._bottom_color
+        )
+
+    def _draw_player_dots(self, canvas: np.ndarray) -> None:
+        """선수 현재 위치 도트만 그립니다 (마커 위에 표시)."""
+        if self._player.last_top_pos:
+            PlayerTracker._draw_player_dot(
+                canvas, self._player.last_top_pos, self._player._top_color
+            )
+        if self._player.last_bottom_pos:
+            PlayerTracker._draw_player_dot(
+                canvas, self._player.last_bottom_pos, self._player._bottom_color
+            )
