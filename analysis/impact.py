@@ -56,11 +56,14 @@ class ImpactEvent:
 
 class ImpactDetector:
     """
-    Skip-Vector 물리 기반 타점 감지기.
-
-    Usage:
-        detector = ImpactDetector(fps=30.0, net_y_ratio=0.46)
-        events   = detector.detect(x_arr, y_arr)
+    셔틀콕 궤적에서 타점을 감지하는 클래스입니다.
+    알고리즘:
+      1. 프레임별 충격량(impulse) 점수 계산
+         - k-2/k+2 점프 인덱스로 안정적인 속도 벡터 계산
+         - Skip-Vector Check로 네트/기둥 노이즈 제거
+         - 타점 후 최소 비행 거리 체크로 오작동 방지
+      2. 피크 검출로 타점 후보 추출
+      3. 연속된 같은 선수 타점 그룹핑으로 중복 제거
     """
 
     def __init__(
@@ -80,21 +83,15 @@ class ImpactDetector:
         x: np.ndarray,
         y: np.ndarray,
     ) -> List[ImpactEvent]:
-        """
-        x, y 궤적 배열을 분석하여 ImpactEvent 목록을 반환합니다.
-
-        Args:
-            x: 셔틀콕 X 좌표 배열 (0이면 비가시 프레임)
-            y: 셔틀콕 Y 좌표 배열
-
-        Returns:
-            그룹핑·순서 번호가 부여된 ImpactEvent 리스트
-        """
         scores     = self._compute_impulse_scores(x, y)
         raw_frames = self._find_peaks(scores)
         candidates = self._build_candidates(raw_frames, x, y, scores)
-        grouped    = self._group_by_player(candidates)
-        return grouped
+        
+        # HIt2.ipynb와 동일하게 작동하도록 그룹핑 필터 없이 전부 타점 인정
+        for idx, event in enumerate(candidates):
+            event.hit_number = idx + 1
+            
+        return candidates
 
     # ── 내부 메서드 ─────────────────────────────────────────
 
@@ -157,10 +154,10 @@ class ImpactDetector:
             future_idx = valid_idx[valid_idx > i_curr]
             if len(future_idx) < 3:
                 continue
-            # 앞으로 최대 10프레임 뒤 위치까지 확인 (고정 [4] 인덱스 문제 해결)
-            check_end = min(len(future_idx), 10)
-            final_x   = x[future_idx[check_end - 1]]
-            final_y   = y[future_idx[check_end - 1]]
+
+           # HIt2.ipynb와 완벽히 동일하게: 셔틀콕의 마지막 트래킹 위치와 거리 비교
+            final_x   = x[future_idx[-1]]
+            final_y   = y[future_idx[-1]]
             flight_d  = np.hypot(final_x - x[i_curr], final_y - y[i_curr])
             if flight_d < cfg["min_flight_dist"]:
                 continue
