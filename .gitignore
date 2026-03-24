@@ -1,0 +1,38 @@
+# --- Python 관련 ---
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+
+# --- IDE 및 OS 관련 ---
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# --- Jupyter Notebook 관련 ---
+.ipynb_checkpoints/
+
+# --- 데이터 및 영상 (용량 문제로 제외) ---
+# 원본 영상 및 분석 결과물 폴더 전체 제외
+inputVideo/
+result/
+prediction/
+
+# 개별 대용량 영상 파일 및 임시 파일
+*.mp4
+*.avi
+*.mov
+temp_res.*
+
+# --- AI 모델 가중치 파일 (용량이 크므로 제외) ---
+# 필요시 팀원들에게는 따로 공유하거나 다운로드 링크 제공 권장
+*.pt
+*.pth
+TrackNetV3/ckpts/
+yolov8n-pose.pt
+
+# --- 기타 환경 설정 ---
+.env
