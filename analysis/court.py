@@ -34,7 +34,7 @@ def compute_homographies(
         to_minimap       : 영상 → 미니맵 변환 행렬 (3×3)
         to_normalized    : 영상 → [0,1]² 정규화 행렬 (3×3)  ← 히트맵용
         minimap_pts      : 미니맵 내 코트 코너 좌표 (4×2 float32)
-        net_y_minimap    : 미니맵 내 네트 Y 좌표
+        net_y_minimap    : 미니맵 내 네트 Y 좌표 (코트 정중앙)
     """
     cc = COURT_CORNERS
     pad = MINIMAP_CONFIG["padding"]
@@ -66,8 +66,12 @@ def compute_homographies(
     to_minimap    = cv2.getPerspectiveTransform(src_pts, dst_pts)
     to_normalized = cv2.getPerspectiveTransform(src_pts, norm_pts)
 
-    # 네트 Y 좌표: 미니맵 상단 두 점의 Y 평균 + 코트 높이의 절반
-    net_y_minimap = (dst_pts[0][1] + dst_pts[3][1]) / 2 + (minimap_h - 2 * pad) / 2
+    # 네트 Y 좌표: 코트 상단 Y(=pad) + 코트 사용 가능 높이의 절반
+    # = pad + (minimap_h - 2*pad) / 2  = minimap_h / 2  (정중앙)
+    # ※ 수정 전 버그: dst_pts[0][1]+dst_pts[3][1] 는 상단+하단 Y 합이라
+    #   (pad + minimap_h-pad)/2 + ... = minimap_h/2 + (minimap_h-2*pad)/2 ≈ 580
+    #   으로 잘못 계산되어 모든 선수가 "top"으로 분류되는 문제가 있었음.
+    net_y_minimap = pad + (minimap_h - 2 * pad) / 2  # 올바른 정중앙 값
 
     return {
         "src_pts":       src_pts,
@@ -137,11 +141,7 @@ def is_inside_court(
 ) -> bool:
     """
     미니맵 좌표가 코트 폴리곤 내부에 있는지 확인합니다.
-
-    [수정 이유]
-    원본 코드에서는 영상 src_pts 기준으로 pointPolygonTest를 했는데,
-    미니맵 좌표와 src_pts 좌표계가 달라 부정확했습니다.
-    미니맵 dst_pts를 기준으로 판단하도록 수정합니다.
+    미니맵 dst_pts 좌표계 기준으로 판단합니다.
     """
     polygon = minimap_pts.astype(np.int32)
     return cv2.pointPolygonTest(polygon, (float(minimap_pt[0]), float(minimap_pt[1])), False) >= 0
@@ -165,11 +165,6 @@ def draw_minimap_court(
       - 서비스 라인: 네트에서 1.98m (코트 길이 13.4m의 약 14.8%)
       - 백 바운더리: 후방 0.76m (약 5.7%)
       - 사이드 라인: 양쪽 0.46m (코트 폭 6.1m의 약 7.5%)
-
-    Args:
-        canvas: 그릴 대상 numpy 배열 (height × width × 3, uint8)
-    Returns:
-        그려진 canvas
     """
     pad    = MINIMAP_CONFIG["padding"]
     cl     = COURT_LINES
@@ -199,7 +194,7 @@ def draw_minimap_court(
     x_mid   = minimap_w // 2
     y_svc_t = pad + int(ch * cl["service_ratio"])
     y_svc_b = pad + int(ch * (1.0 - cl["service_ratio"]))
-    cv2.line(canvas, (x_mid, pad),   (x_mid, y_svc_t), line_color, lw)
+    cv2.line(canvas, (x_mid, pad),     (x_mid, y_svc_t), line_color, lw)
     cv2.line(canvas, (x_mid, y_svc_b), (x_mid, minimap_h - pad), line_color, lw)
 
     return canvas
