@@ -189,7 +189,7 @@ class RallyTrackPipeline:
 
         # ── Step 4: 타점 감지 ────────────────────────────────
         print("[Step 4] 타점 감지")
-        detector   = ImpactDetector(fps=fps, frame_height=frame_h, homographies=hg)
+        detector   = ImpactDetector(fps=fps, frame_height=frame_h)
         hit_events = detector.detect(x_arr, y_arr)
         print(f"         → {len(hit_events)}개")
 

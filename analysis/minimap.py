@@ -123,8 +123,26 @@ class PlayerTracker:
                 self._bot_rep = state
 
     def get_last_pos(self, side: str) -> Optional[Tuple[int, int]]:
-        rep = self._top_rep if side == "top" else self._bot_rep
-        return rep.last_pos if rep else None
+        """
+        누적 경로의 평균 미니맵 Y 값을 기준으로 top/bottom을 동적 판별합니다.
+        초기 side 태그에 의존하지 않으므로 최초 프레임 오분류 문제를 방지합니다.
+        - 평균 Y가 가장 작은(화면 상단) 선수 → top
+        - 평균 Y가 가장 큰(화면 하단) 선수   → bottom
+        """
+        active = [s for s in self._players.values() if len(s.path) > 0]
+        if not active:
+            return None
+
+        def avg_y(state: _PlayerState) -> float:
+            return sum(p[1] for p in state.path) / len(state.path)
+
+        ranked = sorted(active, key=avg_y)   # 오름차순: 작은 Y → top
+
+        if side == "top":
+            return ranked[0].last_pos
+        else:
+            # bottom 선수가 2명 이상 감지됐을 때만 반환 (단독 감지 시 None)
+            return ranked[-1].last_pos if len(ranked) >= 2 else None
 
     def draw_paths(self, canvas: np.ndarray) -> None:
         for state in self._players.values():
