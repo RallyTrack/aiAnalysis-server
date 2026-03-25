@@ -28,12 +28,39 @@ from analysis.minimap import MinimapRenderer
 
 
 def extract_keypoints(pose_result) -> list:
+    """
+    YOLO pose track 결과에서 키포인트를 dict 형식으로 추출합니다.
+ 
+    반환 형식:
+        [{"track_id": int, "keypoints": [[x, y, conf], ...]}, ...]
+ 
+    track_id가 없는 경우(detect 모드) 인덱스 기반 음수 ID를 부여합니다.
+    """
     if pose_result.keypoints is None:
         return []
+ 
     try:
-        return pose_result.keypoints.data.cpu().numpy().tolist()
+        kpts  = pose_result.keypoints.data.cpu().numpy()   # (N, 17, 3)
     except Exception:
         return []
+ 
+    boxes = pose_result.boxes
+    ids   = []
+    if boxes is not None and boxes.id is not None:
+        try:
+            ids = boxes.id.cpu().numpy().astype(int).tolist()
+        except Exception:
+            ids = []
+ 
+    result = []
+    for i, k in enumerate(kpts):
+        tid = int(ids[i]) if i < len(ids) else -(i + 1)
+        result.append({
+            "track_id":  tid,
+            "keypoints": k.tolist(),   # [[x, y, conf], ...] 17개
+        })
+ 
+    return result
 
 
 def run(video_path: str, csv_path: str, output_dir: str = "result") -> None:

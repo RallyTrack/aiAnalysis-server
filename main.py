@@ -82,14 +82,28 @@ def load_trajectory_csv(csv_path: str):
 # ────────────────────────────────────────────────────────────
 
 def extract_keypoints(pose_result) -> list:
-    if pose_result.keypoints is None:
-        return []
-    try:
-        return pose_result.keypoints.data.cpu().numpy().tolist()
-    except Exception:
-        return []
-
-
+      if pose_result.keypoints is None:
+          return []
+      try:
+          kpts  = pose_result.keypoints.data.cpu().numpy()   # (N, 17, 3)
+      except Exception:
+          return []
+      boxes = pose_result.boxes
+      ids   = []
+      if boxes is not None and boxes.id is not None:
+          try:
+              ids = boxes.id.cpu().numpy().astype(int).tolist()
+          except Exception:
+              ids = []
+      result = []
+      for i, k in enumerate(kpts):
+          tid = int(ids[i]) if i < len(ids) else -(i + 1)
+          result.append({
+              "track_id":  tid,
+              "keypoints": k.tolist(),
+          })
+      return result
+ 
 # ────────────────────────────────────────────────────────────
 # H.264 재인코딩
 # ────────────────────────────────────────────────────────────
@@ -175,7 +189,7 @@ class RallyTrackPipeline:
 
         # ── Step 4: 타점 감지 ────────────────────────────────
         print("[Step 4] 타점 감지")
-        detector   = ImpactDetector(fps=fps, frame_height=frame_h)
+        detector   = ImpactDetector(fps=fps, frame_height=frame_h, homographies=hg)
         hit_events = detector.detect(x_arr, y_arr)
         print(f"         → {len(hit_events)}개")
 
