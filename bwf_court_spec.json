@@ -1,0 +1,406 @@
+{
+  "schema_version": "2.0",
+  "description": "BWF 배드민턴 코트 완전 좌표 스펙",
+  "coordinate_system": {
+    "origin": "더블 코트 왼쪽 아래 모서리 (외각 경계선 교차점)",
+    "x_axis": "왼쪽 → 오른쪽, 범위 0 ~ 6.10m",
+    "y_axis": "아래 → 위, 범위 0 ~ 13.40m",
+    "line_width": "0.04m (40mm), 라인 중심에서 ±0.02m",
+    "line_inclusion": "라인 자체는 코트 내부 영역에 포함",
+    "note": "미니맵 좌표계는 Y축 반전: 미니맵 상단=위 엔드라인(y=13.40m), 미니맵 하단=아래 엔드라인(y=0.00m)"
+  },
+  "court_dimensions": {
+    "total_length_m": 13.4,
+    "doubles_width_m": 6.1,
+    "singles_width_m": 5.18,
+    "singles_side_margin_m": 0.46,
+    "net_position_y_m": 6.7,
+    "net_height_post_m": 1.55,
+    "net_height_center_m": 1.524,
+    "line_width_m": 0.04
+  },
+  "key_coordinates": {
+    "y_axis_m": {
+      "bottom_endline": 0.0,
+      "doubles_long_service_bottom": 0.76,
+      "short_service_bottom": 4.72,
+      "net": 6.7,
+      "short_service_top": 8.68,
+      "doubles_long_service_top": 12.64,
+      "top_endline": 13.4
+    },
+    "x_axis_m": {
+      "left_doubles_sideline": 0.0,
+      "left_singles_sideline": 0.46,
+      "center_line": 3.05,
+      "right_singles_sideline": 5.64,
+      "right_doubles_sideline": 6.1
+    }
+  },
+  "lines": [
+    {
+      "id": "boundary_bottom",
+      "name": "아래쪽 엔드라인 (복식)",
+      "type": "boundary",
+      "x1": 0.0,
+      "y1": 0.0,
+      "x2": 6.1,
+      "y2": 0.0,
+      "applies_to": [
+        "singles",
+        "doubles"
+      ],
+      "minimap": {
+        "x1_ratio": 0.0,
+        "y1_ratio": 1.0,
+        "x2_ratio": 1.0,
+        "y2_ratio": 1.0
+      }
+    },
+    {
+      "id": "boundary_top",
+      "name": "위쪽 엔드라인 (복식)",
+      "type": "boundary",
+      "x1": 0.0,
+      "y1": 13.4,
+      "x2": 6.1,
+      "y2": 13.4,
+      "applies_to": [
+        "singles",
+        "doubles"
+      ],
+      "minimap": {
+        "x1_ratio": 0.0,
+        "y1_ratio": 0.0,
+        "x2_ratio": 1.0,
+        "y2_ratio": 0.0
+      }
+    },
+    {
+      "id": "boundary_left",
+      "name": "왼쪽 더블 사이드라인",
+      "type": "boundary",
+      "x1": 0.0,
+      "y1": 0.0,
+      "x2": 0.0,
+      "y2": 13.4,
+      "applies_to": [
+        "doubles"
+      ],
+      "minimap": {
+        "x1_ratio": 0.0,
+        "y1_ratio": 1.0,
+        "x2_ratio": 0.0,
+        "y2_ratio": 0.0
+      }
+    },
+    {
+      "id": "boundary_right",
+      "name": "오른쪽 더블 사이드라인",
+      "type": "boundary",
+      "x1": 6.1,
+      "y1": 0.0,
+      "x2": 6.1,
+      "y2": 13.4,
+      "applies_to": [
+        "doubles"
+      ],
+      "minimap": {
+        "x1_ratio": 1.0,
+        "y1_ratio": 1.0,
+        "x2_ratio": 1.0,
+        "y2_ratio": 0.0
+      }
+    },
+    {
+      "id": "singles_sideline_left",
+      "name": "왼쪽 단식 사이드라인",
+      "type": "singles_sideline",
+      "x1": 0.46,
+      "y1": 0.0,
+      "x2": 0.46,
+      "y2": 13.4,
+      "applies_to": [
+        "singles"
+      ],
+      "note": "단식 경기 유효 폭 왼쪽 경계 (x=0.46m)",
+      "minimap": {
+        "x1_ratio": 0.07541,
+        "y1_ratio": 1.0,
+        "x2_ratio": 0.07541,
+        "y2_ratio": 0.0
+      }
+    },
+    {
+      "id": "singles_sideline_right",
+      "name": "오른쪽 단식 사이드라인",
+      "type": "singles_sideline",
+      "x1": 5.64,
+      "y1": 0.0,
+      "x2": 5.64,
+      "y2": 13.4,
+      "applies_to": [
+        "singles"
+      ],
+      "note": "단식 경기 유효 폭 오른쪽 경계 (x=5.64m)",
+      "minimap": {
+        "x1_ratio": 0.92459,
+        "y1_ratio": 1.0,
+        "x2_ratio": 0.92459,
+        "y2_ratio": 0.0
+      }
+    },
+    {
+      "id": "net",
+      "name": "네트",
+      "type": "net",
+      "x1": 0.0,
+      "y1": 6.7,
+      "x2": 6.1,
+      "y2": 6.7,
+      "applies_to": [
+        "singles",
+        "doubles"
+      ],
+      "net_height_post_m": 1.55,
+      "net_height_center_m": 1.524,
+      "note": "코트 정중앙 y=6.70m (=13.40/2)",
+      "minimap": {
+        "x1_ratio": 0.0,
+        "y1_ratio": 0.5,
+        "x2_ratio": 1.0,
+        "y2_ratio": 0.5
+      }
+    },
+    {
+      "id": "short_service_line_bottom",
+      "name": "아래 숏서비스라인 (Short Service Line)",
+      "type": "service_line",
+      "x1": 0.0,
+      "y1": 4.72,
+      "x2": 6.1,
+      "y2": 4.72,
+      "applies_to": [
+        "singles",
+        "doubles"
+      ],
+      "distance_from_net_m": 1.98,
+      "note": "네트(6.70m)에서 아래 방향 1.98m: y=6.70-1.98=4.72m",
+      "minimap": {
+        "x1_ratio": 0.0,
+        "y1_ratio": 0.647761,
+        "x2_ratio": 1.0,
+        "y2_ratio": 0.647761
+      }
+    },
+    {
+      "id": "short_service_line_top",
+      "name": "위 숏서비스라인 (Short Service Line)",
+      "type": "service_line",
+      "x1": 0.0,
+      "y1": 8.68,
+      "x2": 6.1,
+      "y2": 8.68,
+      "applies_to": [
+        "singles",
+        "doubles"
+      ],
+      "distance_from_net_m": 1.98,
+      "note": "네트(6.70m)에서 위 방향 1.98m: y=6.70+1.98=8.68m",
+      "minimap": {
+        "x1_ratio": 0.0,
+        "y1_ratio": 0.352239,
+        "x2_ratio": 1.0,
+        "y2_ratio": 0.352239
+      }
+    },
+    {
+      "id": "long_service_line_doubles_bottom",
+      "name": "아래 복식 롱서비스라인 (Long Service Line for Doubles)",
+      "type": "service_line",
+      "x1": 0.0,
+      "y1": 0.76,
+      "x2": 6.1,
+      "y2": 0.76,
+      "applies_to": [
+        "doubles"
+      ],
+      "distance_from_endline_m": 0.76,
+      "note": "아래 엔드라인(y=0)에서 위 방향 0.76m: y=0.76m",
+      "minimap": {
+        "x1_ratio": 0.0,
+        "y1_ratio": 0.943284,
+        "x2_ratio": 1.0,
+        "y2_ratio": 0.943284
+      }
+    },
+    {
+      "id": "long_service_line_doubles_top",
+      "name": "위 복식 롱서비스라인 (Long Service Line for Doubles)",
+      "type": "service_line",
+      "x1": 0.0,
+      "y1": 12.64,
+      "x2": 6.1,
+      "y2": 12.64,
+      "applies_to": [
+        "doubles"
+      ],
+      "distance_from_endline_m": 0.76,
+      "note": "위 엔드라인(y=13.40)에서 아래 방향 0.76m: y=13.40-0.76=12.64m",
+      "minimap": {
+        "x1_ratio": 0.0,
+        "y1_ratio": 0.056716,
+        "x2_ratio": 1.0,
+        "y2_ratio": 0.056716
+      }
+    },
+    {
+      "id": "center_service_line_bottom",
+      "name": "아래 코트 센터 서비스 라인",
+      "type": "center_service_line",
+      "x1": 3.05,
+      "y1": 0.0,
+      "x2": 3.05,
+      "y2": 4.72,
+      "applies_to": [
+        "singles",
+        "doubles"
+      ],
+      "note": "아래 엔드라인(y=0)에서 아래 숏서비스라인(y=4.72m)까지, x=3.05m(코트 폭 중앙)",
+      "minimap": {
+        "x1_ratio": 0.5,
+        "y1_ratio": 1.0,
+        "x2_ratio": 0.5,
+        "y2_ratio": 0.647761
+      }
+    },
+    {
+      "id": "center_service_line_top",
+      "name": "위 코트 센터 서비스 라인",
+      "type": "center_service_line",
+      "x1": 3.05,
+      "y1": 8.68,
+      "x2": 3.05,
+      "y2": 13.4,
+      "applies_to": [
+        "singles",
+        "doubles"
+      ],
+      "note": "위 숏서비스라인(y=8.68m)에서 위 엔드라인(y=13.40m)까지, x=3.05m",
+      "minimap": {
+        "x1_ratio": 0.5,
+        "y1_ratio": 0.352239,
+        "x2_ratio": 0.5,
+        "y2_ratio": 0.0
+      }
+    }
+  ],
+  "service_courts": {
+    "description": "서비스 구역 직사각형 정의 (x_min, y_min, x_max, y_max)",
+    "singles": {
+      "bottom_right": {
+        "label": "단식 아래 오른쪽 서비스코트",
+        "x_min": 3.05,
+        "y_min": 0.0,
+        "x_max": 5.64,
+        "y_max": 4.72,
+        "note": "서브시 대각선 방향 코트 (짝수 점수=오른쪽 서브)"
+      },
+      "bottom_left": {
+        "label": "단식 아래 왼쪽 서비스코트",
+        "x_min": 0.46,
+        "y_min": 0.0,
+        "x_max": 3.05,
+        "y_max": 4.72
+      },
+      "top_right": {
+        "label": "단식 위 오른쪽 서비스코트",
+        "x_min": 3.05,
+        "y_min": 8.68,
+        "x_max": 5.64,
+        "y_max": 13.4
+      },
+      "top_left": {
+        "label": "단식 위 왼쪽 서비스코트",
+        "x_min": 0.46,
+        "y_min": 8.68,
+        "x_max": 3.05,
+        "y_max": 13.4
+      }
+    },
+    "doubles": {
+      "bottom_right": {
+        "label": "복식 아래 오른쪽 서비스코트",
+        "x_min": 3.05,
+        "y_min": 0.76,
+        "x_max": 6.1,
+        "y_max": 4.72,
+        "note": "복식 서브 유효 구역 (롱서비스라인~숏서비스라인)"
+      },
+      "bottom_left": {
+        "label": "복식 아래 왼쪽 서비스코트",
+        "x_min": 0.0,
+        "y_min": 0.76,
+        "x_max": 3.05,
+        "y_max": 4.72
+      },
+      "top_right": {
+        "label": "복식 위 오른쪽 서비스코트",
+        "x_min": 3.05,
+        "y_min": 8.68,
+        "x_max": 6.1,
+        "y_max": 12.64
+      },
+      "top_left": {
+        "label": "복식 위 왼쪽 서비스코트",
+        "x_min": 0.0,
+        "y_min": 8.68,
+        "x_max": 3.05,
+        "y_max": 12.64
+      }
+    }
+  },
+  "net_spec": {
+    "position_y_m": 6.7,
+    "width_m": 6.1,
+    "height_post_m": 1.55,
+    "height_center_m": 1.524,
+    "left_post": {
+      "x": 0.0,
+      "y": 6.7
+    },
+    "right_post": {
+      "x": 6.1,
+      "y": 6.7
+    },
+    "center_point": {
+      "x": 3.05,
+      "y": 6.7
+    }
+  },
+  "minimap_config": {
+    "canvas_width_px": 310,
+    "canvas_height_px": 680,
+    "padding_px": 25,
+    "usable_width_px": 260,
+    "usable_height_px": 630,
+    "scale_x_px_per_m": 42.623,
+    "scale_y_px_per_m": 47.0149,
+    "y_axis_inverted": true,
+    "description": "미니맵 상단(y_px=25) = 위 엔드라인(y=13.40m), 미니맵 하단(y_px=655) = 아래 엔드라인(y=0.00m)",
+    "key_pixel_coords": {
+      "top_endline_px": 25,
+      "long_svc_top_px": 60,
+      "short_svc_top_px": 246,
+      "net_px": 340,
+      "short_svc_bot_px": 433,
+      "long_svc_bot_px": 619,
+      "bottom_endline_px": 655,
+      "left_doubles_px": 25,
+      "left_singles_px": 44,
+      "center_px": 155,
+      "right_singles_px": 265,
+      "right_doubles_px": 285
+    }
+  }
+}
