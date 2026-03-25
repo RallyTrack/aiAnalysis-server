@@ -1,17 +1,43 @@
 """
-RallyTrack - 메인 분석 파이프라인
+RallyTrack - 메인 분석 파이프라인 (v3)
 
-Separation.ipynb 기반: 영상 3개 + 타점 JSON을 출력합니다.
+[v3 변경 사항]
+  1. 코트 코너 자동 검출 통합
+     - 이전: config.COURT_CORNERS 하드코딩
+     - 변경: CourtCornerDetector가 영상에서 자동으로 코너 검출
+             검출 실패 시 해상도 기반 폴백 자동 전환
+
+  2. 웹 연동 데이터 출력 추가 (--web-export 플래그)
+     - result/{name}_frame_data.json  ← 프레임별 선수/셔틀 좌표 (프론트 애니메이션용)
+     - result/{name}_summary.json     ← 경기 요약 (대시보드용)
+     - result/{name}_court_corners.json ← 검출된 코트 코너 좌표
+
+  3. 미니맵 코트 라인 BWF 표준 규격 적용
+     (court.py draw_minimap_court() 업데이트 반영)
 
 출력물:
-  result/{name}_1_main.mp4       ← 원본 + YOLO 스켈레톤 오버레이
-  result/{name}_2_minimap.mp4    ← 2D Top-Down 미니맵 (360×600)
-  result/{name}_3_skeleton.mp4   ← 원근감 코트 스켈레톤 뷰 (frame_w × 1000)
-  result/{name}_hits.json        ← 타점 API 데이터
+  result/{name}_1_main.mp4           ← 원본 + YOLO 스켈레톤 오버레이
+  result/{name}_2_minimap.mp4        ← 2D Top-Down 미니맵 (320×670)
+  result/{name}_3_skeleton.mp4       ← 원근감 코트 스켈레톤 뷰
+  result/{name}_hits.json            ← 타점 API 데이터
+  [--web-export 시 추가]
+  result/{name}_frame_data.json      ← 프레임별 정규화 좌표 스트림
+  result/{name}_summary.json         ← 경기 요약
+  result/{name}_court_corners.json   ← 코트 코너 검출 결과
 
 실행:
+  # 기본 (영상 3개 + 타점 JSON)
   python main.py --video inputVideo/test_8sec.mp4
+
+  # TrackNet 생략 (CSV가 이미 있을 때)
   python main.py --video inputVideo/test_8sec.mp4 --skip-tracknet
+
+  # 웹 연동 데이터까지 출력
+  python main.py --video inputVideo/test_8sec.mp4 --web-export
+
+  # 코트 코너 수동 지정 (자동 검출 대신)
+  python main.py --video inputVideo/test_8sec.mp4 \\
+      --corners 0.20,0.35,0.80,0.35,0.90,0.97,0.10,0.97
 """
 
 from __future__ import annotations
@@ -30,11 +56,17 @@ import numpy as np
 import pandas as pd
 from ultralytics import YOLO
 
-from analysis.config        import PATHS, TRACKNET_CONFIG, MINIMAP_CONFIG, POSE_CONFIG
-from analysis.court         import compute_homographies
-from analysis.impact        import ImpactDetector, to_api_json
-from analysis.minimap       import MinimapRenderer
+from analysis.config import PATHS, TRACKNET_CONFIG, MINIMAP_CONFIG, POSE_CONFIG
+from analysis.court  import compute_homographies
+from analysis.court_detector import CourtCornerDetector, CourtCorners, visualize_corners
+from analysis.impact import ImpactDetector, to_api_json
+from analysis.minimap import MinimapRenderer
 from analysis.skeleton_view import SkeletonCourtRenderer
+from analysis.web_exporter import (
+    WebDataCollector,
+    save_hits_json,
+    save_court_corners_json,
+)
 
 
 # ────────────────────────────────────────────────────────────
@@ -78,32 +110,83 @@ def load_trajectory_csv(csv_path: str):
 
 
 # ────────────────────────────────────────────────────────────
+# 코트 코너 검출
+# ────────────────────────────────────────────────────────────
+
+def detect_corners(
+    video_path:      str,
+    manual_corners:  Optional[str] = None,
+    frame_w:         int = 0,
+    frame_h:         int = 0,
+) -> CourtCorners:
+    """
+    코트 코너를 결정합니다.
+
+    우선순위:
+      1. --corners CLI 인자 (수동 지정)
+      2. CourtCornerDetector 자동 검출
+      3. 해상도 기반 폴백
+
+    Args:
+        video_path:     분석 영상 경로
+        manual_corners: "x1,y1,x2,y2,x3,y3,x4,y4" 형태 정규화 비율 문자열
+                        순서: [좌상, 우상, 우하, 좌하] X,Y 쌍
+        frame_w, frame_h: 영상 해상도
+
+    Returns:
+        CourtCorners 인스턴스
+    """
+    if manual_corners:
+        # CLI 수동 지정
+        vals = [float(v) for v in manual_corners.split(",")]
+        if len(vals) != 8:
+            raise ValueError("--corners 인자는 정확히 8개 값이 필요합니다 (x1,y1,...,x4,y4)")
+        print(f"[Step 3] 코트 코너 수동 지정 사용")
+        return CourtCorners(
+            top_left     = (vals[0] * frame_w, vals[1] * frame_h),
+            top_right    = (vals[2] * frame_w, vals[3] * frame_h),
+            bottom_right = (vals[4] * frame_w, vals[5] * frame_h),
+            bottom_left  = (vals[6] * frame_w, vals[7] * frame_h),
+            confidence   = 1.0,
+            method       = "manual",
+        )
+
+    # 자동 검출
+    print("[Step 3] 코트 코너 자동 검출 시작...")
+    detector = CourtCornerDetector()
+    corners  = detector.detect(video_path)
+    print(f"         → 방법={corners.method}, 신뢰도={corners.confidence:.2f}")
+    return corners
+
+
+# ────────────────────────────────────────────────────────────
 # 키포인트 추출
 # ────────────────────────────────────────────────────────────
 
 def extract_keypoints(pose_result) -> list:
-      if pose_result.keypoints is None:
-          return []
-      try:
-          kpts  = pose_result.keypoints.data.cpu().numpy()   # (N, 17, 3)
-      except Exception:
-          return []
-      boxes = pose_result.boxes
-      ids   = []
-      if boxes is not None and boxes.id is not None:
-          try:
-              ids = boxes.id.cpu().numpy().astype(int).tolist()
-          except Exception:
-              ids = []
-      result = []
-      for i, k in enumerate(kpts):
-          tid = int(ids[i]) if i < len(ids) else -(i + 1)
-          result.append({
-              "track_id":  tid,
-              "keypoints": k.tolist(),
-          })
-      return result
- 
+    if pose_result.keypoints is None:
+        return []
+    try:
+        kpts = pose_result.keypoints.data.cpu().numpy()   # (N, 17, 3)
+    except Exception:
+        return []
+    boxes = pose_result.boxes
+    ids   = []
+    if boxes is not None and boxes.id is not None:
+        try:
+            ids = boxes.id.cpu().numpy().astype(int).tolist()
+        except Exception:
+            ids = []
+    result = []
+    for i, k in enumerate(kpts):
+        tid = int(ids[i]) if i < len(ids) else -(i + 1)
+        result.append({
+            "track_id":  tid,
+            "keypoints": k.tolist(),
+        })
+    return result
+
+
 # ────────────────────────────────────────────────────────────
 # H.264 재인코딩
 # ────────────────────────────────────────────────────────────
@@ -137,16 +220,20 @@ class RallyTrackPipeline:
     """
     배드민턴 경기 영상 분석 전체 파이프라인.
 
-    Separation.ipynb의 3개 영상 분리 출력을 클래스로 모듈화합니다.
-
     웹 연동 시 사용법:
         pipeline = RallyTrackPipeline()
-        result   = pipeline.run("inputVideo/match.mp4")
-        # result = { "video_fps": ..., "total_hits": ..., "hits_data": [...] }
+        result   = pipeline.run("inputVideo/match.mp4", web_export=True)
+        # result = { "video_fps": ..., "total_hits": ..., "hits_data": [...],
+        #            "web_files": {"frame_data": ..., "summary": ...} }
     """
 
-    def __init__(self, skip_tracknet: bool = False):
-        self.skip_tracknet = skip_tracknet
+    def __init__(
+        self,
+        skip_tracknet:  bool = False,
+        manual_corners: Optional[str] = None,
+    ):
+        self.skip_tracknet  = skip_tracknet
+        self.manual_corners = manual_corners
         self._pose_model: Optional[YOLO] = None
 
     @property
@@ -156,7 +243,7 @@ class RallyTrackPipeline:
             self._pose_model = YOLO(PATHS["yolo_model"])
         return self._pose_model
 
-    def run(self, video_path: str) -> dict:
+    def run(self, video_path: str, web_export: bool = False) -> dict:
         video_path = os.path.abspath(video_path)
         video_name = Path(video_path).stem
         os.makedirs(PATHS["result_dir"],     exist_ok=True)
@@ -181,25 +268,54 @@ class RallyTrackPipeline:
         frame_h  = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         fps      = cap.get(cv2.CAP_PROP_FPS)
         n_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        cap.release()
         print(f"[Step 2] {frame_w}×{frame_h} @ {fps:.1f}fps, {n_frames}프레임")
 
-        # ── Step 3: 호모그래피 ──────────────────────────────
-        print("[Step 3] 호모그래피 계산")
-        hg = compute_homographies(frame_w, frame_h)
+        # ── Step 3: 코트 코너 자동 검출 ─────────────────────
+        corners = detect_corners(
+            video_path,
+            manual_corners = self.manual_corners,
+            frame_w        = frame_w,
+            frame_h        = frame_h,
+        )
 
-        # ── Step 4: 타점 감지 ────────────────────────────────
-        print("[Step 4] 타점 감지")
+        # ── Step 4: 호모그래피 계산 ──────────────────────────
+        print("[Step 4] 호모그래피 계산")
+        hg = compute_homographies(frame_w, frame_h, corners)
+
+        # 코트 코너 시각화 이미지 저장 (디버그용)
+        cap_debug = cv2.VideoCapture(video_path)
+        ret, debug_frame = cap_debug.read()
+        cap_debug.release()
+        if ret:
+            vis = visualize_corners(debug_frame, corners)
+            vis_path = os.path.join(PATHS["result_dir"], f"{video_name}_court_viz.jpg")
+            cv2.imwrite(vis_path, vis)
+            print(f"         코트 시각화 → {vis_path}")
+
+        # ── Step 5: 타점 감지 ────────────────────────────────
+        print("[Step 5] 타점 감지")
         detector   = ImpactDetector(fps=fps, frame_height=frame_h)
         hit_events = detector.detect(x_arr, y_arr)
         print(f"         → {len(hit_events)}개")
 
-        # ── Step 5: 렌더러 초기화 ────────────────────────────
+        # ── Step 6: 렌더러 초기화 ────────────────────────────
         minimap_renderer  = MinimapRenderer(hg, hit_events)
         skeleton_renderer = SkeletonCourtRenderer(frame_w, frame_h, hg)
 
+        # 웹 데이터 수집기 (web_export 모드)
+        web_collector: Optional[WebDataCollector] = None
+        if web_export:
+            web_collector = WebDataCollector(
+                homographies  = hg,
+                hit_events    = hit_events,
+                fps           = fps,
+                net_y_minimap = hg["net_y_minimap"],
+            )
+
         mw   = MINIMAP_CONFIG["width"]
         mh   = MINIMAP_CONFIG["height"]
-        sk_h = 1000  # ShuttleMap.ipynb 기준
+        sk_h = 1000
 
         fourcc = cv2.VideoWriter_fourcc(*"mp4v")
         rd     = PATHS["result_dir"]
@@ -207,14 +323,15 @@ class RallyTrackPipeline:
         tmp_2  = os.path.join(rd, f"_tmp_{video_name}_2.mp4")
         tmp_3  = os.path.join(rd, f"_tmp_{video_name}_3.mp4")
 
+        cap = cv2.VideoCapture(video_path)
         out_1 = cv2.VideoWriter(tmp_1, fourcc, fps, (frame_w, frame_h))
         out_2 = cv2.VideoWriter(tmp_2, fourcc, fps, (mw, mh))
         out_3 = cv2.VideoWriter(tmp_3, fourcc, fps, (frame_w, sk_h))
 
         hit_frames = {e.frame for e in hit_events}
 
-        # ── Step 6: 프레임 루프 ──────────────────────────────
-        print("[Step 5] 렌더링 시작")
+        # ── Step 7: 프레임 루프 ──────────────────────────────
+        print("[Step 6] 렌더링 시작")
         frame_idx = 0
         t0        = time.time()
 
@@ -240,7 +357,6 @@ class RallyTrackPipeline:
             if sx > 0 and sy > 0:
                 cv2.circle(annotated, (int(sx), int(sy)), 7, (0, 215, 255), -1)
 
-            # 타점 플래시 (±2 프레임)
             if any(abs(frame_idx - hf) <= 2 for hf in hit_frames):
                 cv2.putText(
                     annotated, "IMPACT",
@@ -252,9 +368,11 @@ class RallyTrackPipeline:
                     annotated[:, :, 2].astype(np.int16) + 60, 0, 255
                 ).astype(np.uint8)
 
+            # 코너 검출 신뢰도 표시
             cv2.putText(
-                annotated, f"F:{frame_idx}",
-                (20, 50), cv2.FONT_HERSHEY_SIMPLEX, 1.0,
+                annotated,
+                f"F:{frame_idx}  Court:{corners.method}({corners.confidence:.2f})",
+                (20, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.7,
                 (200, 200, 200), 2, cv2.LINE_AA,
             )
             out_1.write(annotated)
@@ -271,6 +389,10 @@ class RallyTrackPipeline:
             )
             out_3.write(skeleton_canvas)
 
+            # ── 웹 데이터 수집 ────────────────────────────────
+            if web_collector is not None:
+                web_collector.record(frame_idx, sx, sy, keypoints_list)
+
             frame_idx += 1
             if frame_idx % 50 == 0:
                 print(f"         {frame_idx}/{n_frames} ({time.time()-t0:.1f}s)")
@@ -279,10 +401,10 @@ class RallyTrackPipeline:
         out_1.release()
         out_2.release()
         out_3.release()
-        print(f"[Step 5] 완료 ({frame_idx}프레임, {time.time()-t0:.1f}s)")
+        print(f"[Step 6] 완료 ({frame_idx}프레임, {time.time()-t0:.1f}s)")
 
-        # ── Step 7: H.264 재인코딩 ───────────────────────────
-        print("[Step 6] H.264 인코딩")
+        # ── Step 8: H.264 재인코딩 ───────────────────────────
+        print("[Step 7] H.264 인코딩")
         f1 = os.path.join(rd, f"{video_name}_1_main.mp4")
         f2 = os.path.join(rd, f"{video_name}_2_minimap.mp4")
         f3 = os.path.join(rd, f"{video_name}_3_skeleton.mp4")
@@ -290,30 +412,60 @@ class RallyTrackPipeline:
         reencode_h264(tmp_2, f2)
         reencode_h264(tmp_3, f3)
 
-        # ── Step 8: 타점 JSON ────────────────────────────────
-        api_data  = to_api_json(hit_events, fps)
+        # ── Step 9: 타점 JSON ────────────────────────────────
         json_path = os.path.join(rd, f"{video_name}_hits.json")
-        with open(json_path, "w", encoding="utf-8") as fh:
-            json.dump(api_data, fh, ensure_ascii=False, indent=4)
+        save_hits_json(hit_events, fps, json_path)
 
-        self._print_summary(hit_events, video_name, f1, f2, f3, json_path)
-        return api_data
+        # 코트 코너 JSON
+        corners_json_path = os.path.join(rd, f"{video_name}_court_corners.json")
+        save_court_corners_json(hg["corners_info"], corners_json_path)
+
+        # ── Step 10: 웹 연동 데이터 저장 (옵션) ──────────────
+        web_files = {}
+        if web_collector is not None:
+            print("[Step 8] 웹 연동 데이터 저장")
+            web_files = web_collector.save(rd, video_name)
+
+        # 기존 to_api_json 형식도 함께 반환
+        from analysis.impact import to_api_json
+        api_data  = to_api_json(hit_events, fps)
+
+        self._print_summary(
+            hit_events, corners, video_name,
+            f1, f2, f3, json_path, corners_json_path,
+            web_files,
+        )
+
+        return {
+            **api_data,
+            "corners":   hg["corners_info"],
+            "web_files": web_files,
+        }
 
     @staticmethod
-    def _print_summary(hit_events, name, f1, f2, f3, json_p):
-        print("\n" + "═" * 55)
+    def _print_summary(
+        hit_events, corners, name,
+        f1, f2, f3, json_p, corners_p,
+        web_files,
+    ):
+        print("\n" + "═" * 60)
         print(f"  RallyTrack 완료 — {name}")
-        print("═" * 55)
-        print(f"  타점 수           : {len(hit_events)}개")
-        print(f"  영상 1 (원본)     : {f1}")
-        print(f"  영상 2 (미니맵)   : {f2}")
-        print(f"  영상 3 (스켈레톤) : {f3}")
-        print(f"  타점 JSON         : {json_p}")
-        print("─" * 55)
+        print("═" * 60)
+        print(f"  타점 수             : {len(hit_events)}개")
+        print(f"  코트 검출 방법      : {corners.method}  (신뢰도 {corners.confidence:.2f})")
+        print(f"  영상 1 (원본)       : {f1}")
+        print(f"  영상 2 (미니맵)     : {f2}")
+        print(f"  영상 3 (스켈레톤)   : {f3}")
+        print(f"  타점 JSON           : {json_p}")
+        print(f"  코트 코너 JSON      : {corners_p}")
+        if web_files:
+            print(f"  프레임 데이터 JSON  : {web_files.get('frame_data', '-')}")
+            print(f"  요약 JSON           : {web_files.get('summary', '-')}")
+        print("─" * 60)
         for e in hit_events:
             side = "상단(핑크)" if e.owner == "top" else "하단(라임)"
             print(f"    #{e.hit_number:02d}  {e.time_sec:6.2f}s  {side}")
-        print("═" * 55 + "\n")
+        print("═" * 60 + "\n")
 
 
 # ────────────────────────────────────────────────────────────
@@ -322,14 +474,29 @@ class RallyTrackPipeline:
 
 def main():
     parser = argparse.ArgumentParser(description="RallyTrack - 배드민턴 경기 분석")
-    parser.add_argument("--video", "-v", required=True,
+    parser.add_argument("--video",    "-v", required=True,
                         help="분석할 영상 경로")
     parser.add_argument("--skip-tracknet", action="store_true",
                         help="TrackNet 생략 (CSV가 이미 있을 때)")
+    parser.add_argument("--web-export", action="store_true",
+                        help="웹 연동용 JSON 데이터 추가 출력")
+    parser.add_argument(
+        "--corners",
+        default=None,
+        metavar="x1,y1,x2,y2,x3,y3,x4,y4",
+        help=(
+            "코트 코너 수동 지정 (정규화 비율 0~1, 자동 검출 대신 사용).\n"
+            "순서: 좌상X,좌상Y, 우상X,우상Y, 우하X,우하Y, 좌하X,좌하Y\n"
+            "예: --corners 0.20,0.35,0.80,0.35,0.90,0.97,0.10,0.97"
+        ),
+    )
     args = parser.parse_args()
 
-    pipeline = RallyTrackPipeline(skip_tracknet=args.skip_tracknet)
-    pipeline.run(args.video)
+    pipeline = RallyTrackPipeline(
+        skip_tracknet  = args.skip_tracknet,
+        manual_corners = args.corners,
+    )
+    pipeline.run(args.video, web_export=args.web_export)
 
 
 if __name__ == "__main__":

@@ -1,6 +1,12 @@
 """
 RallyTrack - 전역 설정 파일
 모든 분석 파라미터와 경로를 중앙에서 관리합니다.
+
+[v2 변경 사항]
+  - COURT_CORNERS 하드코딩 제거
+    → 코트 코너는 court_detector.py가 자동으로 검출합니다.
+  - COURT_DETECTOR_CONFIG 추가
+    → 자동 검출 알고리즘 파라미터를 중앙 관리합니다.
 """
 
 import os
@@ -34,10 +40,10 @@ TRACKNET_CONFIG = {
 # 미니맵 캔버스 크기
 # ─────────────────────────────────────────────
 MINIMAP_CONFIG = {
-    "width":  360,
-    "height": 600,
-    # 코트 내부 패딩 (px)
-    "padding": 20,
+    "width":  320,
+    "height": 670,
+    # 코트 내부 패딩 (px) — 캔버스 여백
+    "padding": 25,
     # 코트 라인 색상 (BGR)
     "line_color":  (255, 255, 255),
     "net_color":   (0,   80,  255),
@@ -53,30 +59,82 @@ MINIMAP_CONFIG = {
 }
 
 # ─────────────────────────────────────────────
-# 호모그래피 — 코트 코너 기준점 (원본 영상 비율)
+# 배드민턴 코트 실제 치수 (국제 BWF 규격)
 #
-# [좌상, 우상, 우하, 좌하] 순서로 지정.
-# 카메라 앵글에 따라 튜닝이 필요합니다.
+# 전체 길이 : 13.40m (단식/복식 공통)
+# 전체 폭   : 6.10m  (복식) / 5.18m (단식)
+# 네트 높이  : 1.55m (사이드) / 1.524m (중앙)
+#
+# 라인 간격 (길이 방향):
+#   후방 경계선 ~ 롱 서비스 라인 (복식): 0.76m
+#   후방 경계선 ~ 숏 서비스 라인      : 13.40/2 - 1.98 = 4.72m (전반부)
+#   네트 ~ 숏 서비스 라인 (전방)      : 1.98m
+#
+# 라인 간격 (폭 방향):
+#   사이드 경계선(복식) ~ 사이드라인(단식): 0.46m (각 쪽)
+#   중앙 센터 라인으로 좌우 대칭
+#
+# 미니맵에서의 비율 매핑:
+#   코트 전체 길이 = 미니맵 usable_height
+#   코트 전체 폭   = 미니맵 usable_width
 # ─────────────────────────────────────────────
-COURT_CORNERS = {
-    # 영상 해상도 비율 (0~1)
-    "top_left":     (0.28, 0.46),
-    "top_right":    (0.72, 0.46),
-    "bottom_right": (0.85, 0.97),
-    "bottom_left":  (0.15, 0.97),
+BADMINTON_COURT = {
+    # 실제 치수 (m)
+    "length":         13.40,   # 코트 전체 길이 (복식/단식 공통)
+    "width_doubles":   6.10,   # 복식 전체 폭
+    "width_singles":   5.18,   # 단식 전체 폭
+    "net_to_service":  1.98,   # 네트 ~ 숏 서비스 라인
+    "back_service":    0.76,   # 후방 경계 ~ 롱 서비스 라인 (복식)
+    "singles_side":    0.46,   # 복식→단식 사이드 라인 간격 (각 쪽)
+    "center_service":  3.96,   # 네트 ~ 숏 서비스 라인 구간 좌우 센터 라인
+    #                            (숏 서비스 라인에서만 필요)
+}
+
+# 길이 비율 (미니맵 usable_height 기준 0.0 ~ 1.0)
+# Y=0: 위쪽 경계선, Y=1: 아래쪽 경계선
+COURT_RATIOS = {
+    # 길이 방향 (Y축)
+    "back_service_top":    BADMINTON_COURT["back_service"]    / BADMINTON_COURT["length"],
+    "short_service_top":   BADMINTON_COURT["net_to_service"]  / BADMINTON_COURT["length"],
+    "net":                 0.5,
+    "short_service_bot":   1.0 - BADMINTON_COURT["net_to_service"]  / BADMINTON_COURT["length"],
+    "back_service_bot":    1.0 - BADMINTON_COURT["back_service"]    / BADMINTON_COURT["length"],
+
+    # 폭 방향 (X축) — 복식 폭 기준 0.0~1.0
+    "singles_left":        BADMINTON_COURT["singles_side"] / BADMINTON_COURT["width_doubles"],
+    "singles_right":       1.0 - BADMINTON_COURT["singles_side"] / BADMINTON_COURT["width_doubles"],
+    "center":              0.5,
 }
 
 # ─────────────────────────────────────────────
-# 배드민턴 코트 실제 치수 비율 (국제 규격 기준)
-#   - 전체 길이: 13.4m, 전체 폭: 6.1m
-#   - 서비스 라인: 네트에서 1.98m
-#   - 백 바운더리 라인: 0.76m (롱 서비스 라인)
-#   - 사이드 라인: 각 0.46m (복식 기준)
+# 코트 코너 자동 검출 설정
+#
+# [하드코딩 제거]
+# 이전 버전의 COURT_CORNERS(수동 좌표) 설정은 삭제되었습니다.
+# 코트 코너는 court_detector.CourtCornerDetector가 영상에서 자동 검출합니다.
+#
+# 자동 검출 흐름:
+#   1. detect_court_corners(video_path) 호출
+#   2. CourtCorners 반환 → .to_ratio(w, h) → court.compute_homographies()
 # ─────────────────────────────────────────────
-COURT_LINES = {
-    "service_ratio":   1.98 / 13.4,  # 네트-서비스 라인 거리 비율
-    "back_ratio":      0.76 / 13.4,  # 백 바운더리 라인 비율
-    "side_ratio":      0.46 / 6.1,   # 사이드 라인 비율
+COURT_DETECTOR_CONFIG = {
+    # 분석에 사용할 샘플 프레임 수
+    "sample_frames":       20,
+    # 샘플링 최대 구간 (초) — 영상 앞부분에서 검출
+    "max_sample_sec":      30,
+    # 코트 감지 유효 판정을 위한 최소 그린 비율
+    "green_ratio_min":     0.10,
+    # 허프 직선 변환 최소 투표 수 (낮출수록 더 많은 직선 검출)
+    "hough_threshold":     50,
+    # 허프 직선 최소 길이 (픽셀, 640px 기준 리사이즈 후)
+    "hough_min_line_length": 80,
+    # 허프 직선 최대 연결 갭
+    "hough_max_line_gap":  20,
+    # 최종 채택을 위한 최소 유효 프레임 수
+    "vote_min_frames":     3,
+    # Canny 엣지 임계값
+    "canny_low":           50,
+    "canny_high":          150,
 }
 
 # ─────────────────────────────────────────────
@@ -119,3 +177,20 @@ SKELETON_EDGES = [
     (12, 13), (6, 12),  (7, 13),  (6, 7),
     (6, 8),   (7, 9),   (8, 10),  (9, 11),
 ]
+
+# ─────────────────────────────────────────────
+# 웹 연동 데이터 익스포트 설정
+# ─────────────────────────────────────────────
+WEB_EXPORT_CONFIG = {
+    # 프레임별 데이터 JSON 출력 여부
+    "export_frame_data":    True,
+    # 선수 위치 정규화 좌표(0~1) 포함 여부
+    "include_player_positions": True,
+    # 셔틀콕 궤적 정규화 좌표 포함 여부
+    "include_shuttle_trail": True,
+    # 셔틀콕 궤적 최대 저장 길이 (프레임)
+    "shuttle_trail_length":  30,
+    # 출력 파일명 접미사
+    "frame_data_suffix":    "_frame_data.json",
+    "summary_suffix":       "_summary.json",
+}
