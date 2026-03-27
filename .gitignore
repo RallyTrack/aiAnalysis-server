@@ -29,3 +29,9 @@ weights/*.pth
 
 # 임시 영상 파일
 temp_videos/
+
+# 분석 결과물 (영상 3종 + hits JSON) — S3에 업로드되므로 로컬에만 보관
+result/
+
+# TrackNet CSV 예측 결과 — 재실행 시 자동 생성
+prediction/
