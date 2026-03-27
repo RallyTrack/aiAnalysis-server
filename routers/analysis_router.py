@@ -1,11 +1,11 @@
 """
-분석 라우터 (리팩토링 - RallyTrackPipeline 기반)
+RallyTrack AI 분석 라우터
 
 - POST /analyze : 백엔드에서 호출하는 영상 분석 엔드포인트
-- 동료(feat/intergration 브랜치)의 파이프라인을 FastAPI에 통합
-- 콜백 데이터: hits_data JSON 형식으로 전송
+- 분석 완료 후 minimap / skeleton 영상을 S3에 업로드하고 백엔드에 콜백
 """
 import json
+import os
 import httpx
 from fastapi import APIRouter, BackgroundTasks
 from pydantic import BaseModel
@@ -30,8 +30,12 @@ def _get_pipeline() -> RallyTrackPipeline:
 class AnalyzeRequest(BaseModel):
     videoId: int
     s3Url: str
+    # skeleton
     skeletonUploadUrl: str = ""
     skeletonVideoUrl: str = ""
+    # minimap (NEW)
+    minimapUploadUrl: str = ""
+    minimapVideoUrl: str = ""
 
 
 @router.post("/analyze")
@@ -40,15 +44,50 @@ def analyze_video(request: AnalyzeRequest, background_tasks: BackgroundTasks):
     백엔드에서 영상 업로드 후 호출하는 엔드포인트.
     분석 작업을 백그라운드로 실행하고 즉시 응답을 반환한다.
     """
-    print(f"[분석 요청 수신] videoId={request.videoId}, s3Url={request.s3Url}")
+    print(f"[분석 요청 수신] videoId={request.videoId}")
     background_tasks.add_task(
         run_analysis,
         request.videoId,
         request.s3Url,
         request.skeletonUploadUrl,
         request.skeletonVideoUrl,
+        request.minimapUploadUrl,
+        request.minimapVideoUrl,
     )
     return {"message": "분석이 시작되었습니다.", "videoId": request.videoId}
+
+
+def _upload_to_s3(local_path: str, upload_url: str, label: str) -> bool:
+    """
+    로컬 파일을 S3 presigned PUT URL로 업로드한다.
+
+    Returns:
+        True = 성공, False = 실패
+    """
+    if not upload_url:
+        print(f"[{label} 업로드] upload_url 없음 → 생략")
+        return False
+    if not os.path.exists(local_path):
+        print(f"[{label} 업로드] 파일 없음: {local_path}")
+        return False
+
+    try:
+        with open(local_path, "rb") as f:
+            response = httpx.put(
+                upload_url,
+                content=f.read(),
+                headers={"Content-Type": "video/mp4"},
+                timeout=180.0,
+            )
+        if response.status_code in (200, 204):
+            print(f"[{label} 업로드] 완료")
+            return True
+        else:
+            print(f"[{label} 업로드] 실패 — HTTP {response.status_code}")
+            return False
+    except Exception as e:
+        print(f"[{label} 업로드] 실패 — {e}")
+        return False
 
 
 def run_analysis(
@@ -56,6 +95,8 @@ def run_analysis(
     s3_url: str,
     skeleton_upload_url: str = "",
     skeleton_video_url: str = "",
+    minimap_upload_url: str = "",
+    minimap_video_url: str = "",
 ):
     """
     실제 분석 파이프라인.
@@ -66,8 +107,8 @@ def run_analysis(
        → YOLOv8-pose 관절 추출
        → 물리 기반 타점 감지 (ImpactDetector)
        → 영상 3종 렌더링 (main / minimap / skeleton)
-    3. 스켈레톤 영상 S3 업로드 (선택)
-    4. 백엔드 콜백 — hits_data JSON 형식
+    3. skeleton + minimap 영상 S3 업로드
+    4. 백엔드 콜백
     """
     local_path = None
 
@@ -80,40 +121,23 @@ def run_analysis(
         # 2. RallyTrackPipeline 실행
         pipeline = _get_pipeline()
         api_data = pipeline.run(local_path)
-
-        # result_paths는 콜백에 포함하지 않음 (내부용)
         result_paths = api_data.pop("result_paths", {})
 
-        # 3. 스켈레톤 영상 S3 업로드 (skeleton_upload_url 제공 시)
-        skeleton_video_path = result_paths.get("skeleton_video", "")
-        if skeleton_upload_url and skeleton_video_path:
-            try:
-                import os
-                if os.path.exists(skeleton_video_path):
-                    with open(skeleton_video_path, "rb") as f:
-                        httpx.put(
-                            skeleton_upload_url,
-                            content=f.read(),
-                            headers={"Content-Type": "video/mp4"},
-                            timeout=120.0,
-                        )
-                    print("[스켈레톤 업로드] 완료")
-                else:
-                    print(f"[스켈레톤 업로드] 파일 없음: {skeleton_video_path}")
-            except Exception as e:
-                print(f"[스켈레톤 업로드 실패] {e}")
+        # 3. S3 업로드 (skeleton + minimap)
+        _upload_to_s3(result_paths.get("skeleton_video", ""), skeleton_upload_url, "skeleton")
+        _upload_to_s3(result_paths.get("minimap_video", ""),  minimap_upload_url,  "minimap")
 
         # 4. 백엔드 콜백 데이터 구성
         callback_data = {
-            "videoId":          video_id,
-            "videoFps":         api_data["video_fps"],
-            "totalHits":        api_data["total_hits"],
-            "hitsData":         json.dumps(api_data["hits_data"], ensure_ascii=False),
+            "videoId":   video_id,
+            "videoFps":  api_data["video_fps"],
+            "totalHits": api_data["total_hits"],
+            "hitsData":  api_data["hits_data"],  # list 그대로 전송 (JSON 직렬화는 httpx가 처리)
         }
-
-        # skeletonVideoUrl이 있으면 포함
         if skeleton_video_url:
             callback_data["skeletonVideoUrl"] = skeleton_video_url
+        if minimap_video_url:
+            callback_data["minimapVideoUrl"] = minimap_video_url
 
         # 5. 백엔드 콜백 호출
         response = httpx.post(
@@ -128,7 +152,6 @@ def run_analysis(
         import traceback
         traceback.print_exc()
 
-        # 실패 시 백엔드에 에러 알림
         try:
             httpx.post(
                 f"{BACKEND_URL}/api/v1/analysis/fail",
