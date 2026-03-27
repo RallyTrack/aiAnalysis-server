@@ -6,22 +6,14 @@ import os
 # 백엔드 서버 주소
 BACKEND_URL = os.getenv("BACKEND_URL", "http://localhost:8080")
 
-# 모델 가중치 경로
-WEIGHTS_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "weights")
-MLP_MODEL_PATH = os.path.join(WEIGHTS_DIR, "RT_90plus_model.pth")
-STGCN_MODEL_PATH = os.path.join(WEIGHTS_DIR, "RT_stgcn_model.pth")
-
 # 영상 임시 저장 경로
 TEMP_VIDEO_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "temp_videos")
 os.makedirs(TEMP_VIDEO_DIR, exist_ok=True)
 
-# MediaPipe 설정
-POSE_MIN_DETECTION_CONFIDENCE = 0.5
-POSE_MIN_TRACKING_CONFIDENCE = 0.5
+# 결과물 저장 경로
+RESULT_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "result")
+os.makedirs(RESULT_DIR, exist_ok=True)
 
-# 임팩트 감지 설정
-IMPACT_SENSITIVITY = 0.4
-IMPACT_COOL_DOWN = 0.5
-
-# 스트로크 라벨
-STROKE_LABELS = ["Smash", "Clear", "Drop", "Drive"]
+# TrackNet 예측 CSV 저장 경로
+PREDICTION_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "prediction")
+os.makedirs(PREDICTION_DIR, exist_ok=True)

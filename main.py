@@ -4,25 +4,26 @@ RallyTrack AI 분석서버 엔트리포인트
 실행: uvicorn main:app --reload --port 8000
 """
 from fastapi import FastAPI
-from routers.analyze import router as analyze_router
+from routers.analysis_router import router as analysis_router
 
 app = FastAPI(
     title="RallyTrack AI Analysis Server",
-    description="배드민턴 영상 분석 API (MediaPipe + ST-GCN)",
-    version="1.0.0",
+    description="배드민턴 영상 분석 API",
+    version="2.0.0",
 )
 
-# 라우터 등록
-app.include_router(analyze_router)
+app.include_router(analysis_router)
 
 
 @app.get("/")
 def read_root():
-    return {"message": "Hello, RallyTrack AI Server!"}
+    return {"message": "RallyTrack AI Server"}
 
-@app.get("/health") # 생존 확인(Health Check) 코드
+
+@app.get("/health")
 def health_check():
     return {"status": "ok"}
+
 
 if __name__ == "__main__":
     import uvicorn

@@ -1,10 +1,25 @@
-fastapi
-uvicorn
-httpx
-torch
-torchvision
-mediapipe==0.10.14
-opencv-python
-numpy
-pandas
-scikit-learn
+# Python 3.12 / Mac MPS 기준으로 검증된 버전
+# 2026-03 기준 .venv에 실제 설치된 버전으로 고정
+
+# ── 웹 서버 ────────────────────────────────────────────
+fastapi==0.129.1
+uvicorn==0.41.0
+starlette==0.52.1
+httpx==0.28.1
+
+# ── AI / ML ────────────────────────────────────────────
+torch==2.10.0
+torchvision==0.25.0
+ultralytics==8.4.19
+
+# ── 영상 처리 ───────────────────────────────────────────
+opencv-python==4.13.0.92
+
+# ── 데이터 처리 ─────────────────────────────────────────
+numpy==2.4.2
+pandas==3.0.1
+scipy==1.17.1
+
+# ── 유틸 ───────────────────────────────────────────────
+tqdm==4.67.1
+static-ffmpeg==2.7
