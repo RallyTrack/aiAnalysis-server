@@ -3,15 +3,20 @@ RallyTrack AI 분석 라우터
 
 - POST /analyze : 백엔드에서 호출하는 영상 분석 엔드포인트
 - 분석 완료 후 minimap / skeleton 영상을 S3에 업로드하고 백엔드에 콜백
+
+[수정 사항]
+  - AnalyzeRequest에 singles_corners (코트 4점) 및 net_coords (네트 2점) 필드 추가
+  - run_analysis()에 좌표 데이터 전달
 """
-import json
 import os
+from typing import List, Optional
+
 import httpx
 from fastapi import APIRouter, BackgroundTasks
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, field_validator
 
 from config.settings import BACKEND_URL
-from services.video_service import download_video, cleanup_video
+from services.video_service import cleanup_video, download_video
 from services.pipeline_service import RallyTrackPipeline
 
 router = APIRouter()
@@ -30,12 +35,57 @@ def _get_pipeline() -> RallyTrackPipeline:
 class AnalyzeRequest(BaseModel):
     videoId: int
     s3Url: str
+
     # skeleton
     skeletonUploadUrl: str = ""
     skeletonVideoUrl: str = ""
-    # minimap (NEW)
+
+    # minimap
     minimapUploadUrl: str = ""
     minimapVideoUrl: str = ""
+
+    # ── 사용자 지정 좌표 (프론트에서 캔버스 클릭으로 수집) ──────────────────
+    # 단식 코트 4개 꼭짓점: [[좌상x,y], [우상x,y], [우하x,y], [좌하x,y]]
+    # 값은 원본 영상 픽셀 좌표 기준
+    # None이면 COURT_CORNERS 비율 기반 자동 계산으로 폴백
+    singles_corners: Optional[List[List[float]]] = Field(
+        default=None,
+        description="단식 코트 4꼭짓점 픽셀 좌표 [[좌상],[우상],[우하],[좌하]]",
+        examples=[[[300,400],[980,400],[1100,990],[180,990]]],
+    )
+
+    # 네트 상단 좌우 끝 좌표: [[좌x,y], [우x,y]]
+    # None이면 net_judge를 건너뜀
+    net_coords: Optional[List[List[float]]] = Field(
+        default=None,
+        description="네트 상단 좌우 픽셀 좌표 [[좌],[우]]",
+        examples=[[[300,690],[980,690]]],
+    )
+
+    # ── Validators ─────────────────────────────────────────────────────────
+    @field_validator("singles_corners")
+    @classmethod
+    def validate_singles_corners(cls, v):
+        if v is None:
+            return v
+        if len(v) != 4:
+            raise ValueError("singles_corners는 정확히 4개의 점이어야 합니다.")
+        for pt in v:
+            if len(pt) != 2:
+                raise ValueError("각 점은 [x, y] 형식이어야 합니다.")
+        return v
+
+    @field_validator("net_coords")
+    @classmethod
+    def validate_net_coords(cls, v):
+        if v is None:
+            return v
+        if len(v) != 2:
+            raise ValueError("net_coords는 정확히 2개의 점(좌/우)이어야 합니다.")
+        for pt in v:
+            if len(pt) != 2:
+                raise ValueError("각 점은 [x, y] 형식이어야 합니다.")
+        return v
 
 
 @router.post("/analyze")
@@ -45,6 +95,9 @@ def analyze_video(request: AnalyzeRequest, background_tasks: BackgroundTasks):
     분석 작업을 백그라운드로 실행하고 즉시 응답을 반환한다.
     """
     print(f"[분석 요청 수신] videoId={request.videoId}")
+    print(f"  singles_corners 제공 여부: {request.singles_corners is not None}")
+    print(f"  net_coords 제공 여부:      {request.net_coords is not None}")
+
     background_tasks.add_task(
         run_analysis,
         request.videoId,
@@ -53,6 +106,8 @@ def analyze_video(request: AnalyzeRequest, background_tasks: BackgroundTasks):
         request.skeletonVideoUrl,
         request.minimapUploadUrl,
         request.minimapVideoUrl,
+        request.singles_corners,
+        request.net_coords,
     )
     return {"message": "분석이 시작되었습니다.", "videoId": request.videoId}
 
@@ -97,6 +152,8 @@ def run_analysis(
     skeleton_video_url: str = "",
     minimap_upload_url: str = "",
     minimap_video_url: str = "",
+    singles_corners: Optional[List[List[float]]] = None,
+    net_coords: Optional[List[List[float]]] = None,
 ):
     """
     실제 분석 파이프라인.
@@ -106,6 +163,7 @@ def run_analysis(
        → TrackNetV3 셔틀콕 트래킹
        → YOLOv8-pose 관절 추출
        → 물리 기반 타점 감지 (ImpactDetector)
+       → 네트 판정 (NetJudge, net_coords 제공 시)
        → 영상 3종 렌더링 (main / minimap / skeleton)
     3. skeleton + minimap 영상 S3 업로드
     4. 백엔드 콜백
@@ -120,7 +178,11 @@ def run_analysis(
 
         # 2. RallyTrackPipeline 실행
         pipeline = _get_pipeline()
-        api_data = pipeline.run(local_path)
+        api_data = pipeline.run(
+            local_path,
+            user_corners=singles_corners,
+            net_coords=net_coords,
+        )
         result_paths = api_data.pop("result_paths", {})
 
         # 3. S3 업로드 (skeleton + minimap)
@@ -129,10 +191,11 @@ def run_analysis(
 
         # 4. 백엔드 콜백 데이터 구성
         callback_data = {
-            "videoId":   video_id,
-            "videoFps":  api_data["video_fps"],
-            "totalHits": api_data["total_hits"],
-            "hitsData":  api_data["hits_data"],  # list 그대로 전송 (JSON 직렬화는 httpx가 처리)
+            "videoId":        video_id,
+            "videoFps":       api_data["video_fps"],
+            "totalHits":      api_data["total_hits"],
+            "hitsData":       api_data["hits_data"],
+            "netFaultEvents": api_data.get("net_fault_events", []),
         }
         if skeleton_video_url:
             callback_data["skeletonVideoUrl"] = skeleton_video_url

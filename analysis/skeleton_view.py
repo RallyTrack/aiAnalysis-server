@@ -14,7 +14,7 @@ from __future__ import annotations
 import cv2
 import numpy as np
 from collections import deque
-from typing import List, Tuple
+from typing import Tuple
 
 from .config import MINIMAP_CONFIG, POSE_CONFIG, SKELETON_EDGES
 from .court  import frame_to_minimap, is_inside_court
