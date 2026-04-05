@@ -42,9 +42,12 @@ MINIMAP_CONFIG = {
     # 코트 라인 색상 (BGR)
     "line_color":  (255, 255, 255),
     "net_color":   (0,   80,  255),
+    # 코트 바닥 채색 (Two-tone Green) — 단식 경기 인/아웃 직관적 구분
+    "court_singles_color": ( 48, 115,  50),   # #327330 BGR — 단식 유효 영역
+    "court_doubles_color": ( 26,  64,  27),   # #1B401A BGR — 복식 앨리(단식 아웃)
     # 선수 색상 (BGR) — 상단(서버 쪽), 하단
-    "top_color":   (255, 105, 180),   # 핑크
-    "bottom_color":(50,  205,  50),   # 라임
+    "top_color":   (246, 130,  59),   # Royal Blue  #3B82F6 (사이트 메인 테마색)
+    "bottom_color":( 11, 158, 245),   # Amber Gold  #F59E0B (보색·셔틀콕 상징)
     # 셔틀콕 궤적 색상
     "shuttle_color": (0, 200, 255),
     # 타점 마커 반지름

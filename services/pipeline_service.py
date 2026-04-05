@@ -144,7 +144,7 @@ def _draw_net_overlay(
     """원본 영상 프레임에 네트 상단 라인을 파란색으로 오버레이."""
     pt1 = (int(net_coords[0][0]), int(net_coords[0][1]))
     pt2 = (int(net_coords[1][0]), int(net_coords[1][1]))
-    cv2.line(frame, pt1, pt2, (255, 100, 0), 2)   # BGR 파랑
+    cv2.line(frame, pt1, pt2, (246, 130, 59), 2)   # BGR Royal Blue (#3B82F6)
 
 
 def _draw_fault_overlay(frame: np.ndarray, label: str = "NET FAULT") -> None:
@@ -274,7 +274,7 @@ class RallyTrackPipeline:
 
         # ── Step 5: 렌더러 초기화 ────────────────────────────
         minimap_renderer  = MinimapRenderer(hg, hit_events)
-        skeleton_renderer = SkeletonCourtRenderer(frame_w, frame_h, hg)
+        skeleton_renderer = SkeletonCourtRenderer(frame_w, frame_h, hg, net_coords=net_coords)
 
         mw   = MINIMAP_CONFIG["width"]
         mh   = MINIMAP_CONFIG["height"]
@@ -321,16 +321,17 @@ class RallyTrackPipeline:
             if net_coords is not None:
                 _draw_net_overlay(annotated, net_coords)
 
-            # 타점 표시
+            # 타점 표시 (브랜드 컬러: Royal Blue #3B82F6)
             if any(abs(frame_idx - hf) <= 2 for hf in hit_frames):
                 cv2.putText(
                     annotated, "IMPACT",
                     (frame_w // 2 - 90, 130),
                     cv2.FONT_HERSHEY_DUPLEX, 2.2,
-                    (0, 215, 255), 5, cv2.LINE_AA,
+                    (246, 130, 59), 5, cv2.LINE_AA,   # BGR Royal Blue
                 )
-                annotated[:, :, 2] = np.clip(
-                    annotated[:, :, 2].astype(np.int16) + 60, 0, 255
+                # B 채널 증가 → 파란 하이라이트 (브랜드 컬러 방향)
+                annotated[:, :, 0] = np.clip(
+                    annotated[:, :, 0].astype(np.int16) + 60, 0, 255
                 ).astype(np.uint8)
 
             # 네트 걸림 표시
@@ -414,7 +415,7 @@ class RallyTrackPipeline:
         print(f"  타점 JSON           : {json_p}")
         print("─" * 55)
         for e in hit_events:
-            side = "상단(핑크)" if e.owner == "top" else "하단(라임)"
+            side = "상단(블루)" if e.owner == "top" else "하단(골드)"
             print(f"    #{e.hit_number:02d}  {e.time_sec:6.2f}s  {side}")
         if net_fault_events:
             print("─" * 55)

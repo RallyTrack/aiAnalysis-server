@@ -1,61 +1,142 @@
+# 🏸 RallyTrack AI Analysis Server
+
+배드민턴 경기 영상을 분석하여 셔틀콕 궤적, 선수 동선, 타점, 네트 판정 데이터를 자동으로 추출하고 시각화하는 AI 분석 엔진입니다.
+
+---
+
+## 주요 기능
+
+| 기능 | 설명 |
+|---|---|
+| **Shuttlecock Tracking** | TrackNetV3로 고속 셔틀콕 좌표 정밀 추적 |
+| **Pose Estimation** | YOLOv8-pose 기반 선수 스켈레톤 추출 및 코트 위 위치 실시간 파악 |
+| **Impact Detection** | 물리적 가속도·방향 전환 분석으로 실제 타구 시점 감지 (영상 초반 포함) |
+| **Net Fault Detection** | 사용자 지정 네트 상단 좌표 기반 네트 걸림 자동 판정 |
+| **Mini-map Visualization** | 타구 순서 및 선수 이동 동선을 BWF 규격 코트 위에 시각화 |
+| **Skeleton Court View** | 원근 투영된 코트 위에 선수 스켈레톤과 셔틀콕 궤적을 3D 감각으로 렌더링 |
+
+---
+
+## 출력물
+
+분석 완료 시 `result/` 디렉토리에 4종 파일이 생성됩니다.
+
+```
+result/
+├── {name}_1_main.mp4       ← 원본 + YOLO 스켈레톤 오버레이
+├── {name}_2_minimap.mp4    ← 2D Top-Down BWF 규격 미니맵 (360×600)
+├── {name}_3_skeleton.mp4   ← 원근감 코트 스켈레톤 뷰 (1920×1000)
+└── {name}_hits.json        ← 타점 + 네트판정 데이터 (백엔드 콜백용)
+```
+
+---
+
 ## 프로젝트 구조
+
 ```
 aiAnalysis-server/
-├── main.py                     # 엔트리포인트 (라우터 등록만)
-├── config/
-│   └── settings.py             # 설정값 (경로, 하이퍼파라미터)
+├── main.py                       # FastAPI 엔트리포인트
 ├── routers/
-│   └── analyze.py              # POST /analyze + 분석 파이프라인
+│   └── analyze.py                # POST /analyze 라우터
 ├── services/
-│   ├── video_service.py        # S3 영상 다운로드/삭제
-│   ├── pose_service.py         # MediaPipe 관절 추출 + 임팩트 감지
-│   ├── stroke_service.py       # MLP + ST-GCN 스트로크 분류
-│   ├── heatmap_service.py      # 히트맵 데이터 생성
-│   ├── score_service.py        # 점수 계산 + 타임라인 생성
-│   └── feedback_service.py     # AI 코칭 피드백 + 능력치 생성
-├── models/
-│   ├── mlp_model.py            # UltraStrokeClassifier (엔진 구축 PDF)
-│   └── stgcn_model.py          # BadmintonSTGCN (분류 모델 PDF)
-├── weights/                    # .pth 가중치 파일 (git 제외)
-├── requirements.txt
-└── Dockerfile
------------------------------------------------------------------------------
+│   ├── pipeline_service.py       # 메인 분석 파이프라인
+│   └── video_service.py          # S3 영상 다운로드/삭제
+├── analysis/
+│   ├── config.py                 # 전역 설정 (색상, 경로, 파라미터)
+│   ├── court.py                  # BWF 코트 기하학 / 호모그래피
+│   ├── minimap.py                # 2D Top-Down 미니맵 렌더러
+│   ├── skeleton_view.py          # 원근 코트 스켈레톤 뷰 렌더러
+│   ├── impact.py                 # 타점 감지 (물리 기반)
+│   └── net_judge.py              # 네트 판정 로직
+├── tracknetv3/                   # 셔틀콕 추적 서브모듈
+├── weights/                      # YOLO 가중치 (git 제외)
+├── temp_videos/                  # 처리 중 임시 영상 (git 제외)
+├── prediction/                   # TrackNet CSV 캐시 (git 제외)
+└── result/                       # 분석 결과물 (git 제외)
+```
 
+---
 
-🏸 RallyTrack AI Analysis Engine
+## 기술 스택
 
-✨ 주요 기능
-Shuttlecock Tracking: TrackNetV3 모델을 사용하여 고속으로 이동하는 셔틀콕의 좌표를 정밀하게 추적함.
+- **Deep Learning**: TrackNetV3, YOLOv8-pose (Ultralytics)
+- **Computer Vision**: OpenCV
+- **Data Analysis**: Pandas, NumPy, SciPy
+- **API Server**: FastAPI
+- **Infra**: AWS S3, FFmpeg
 
-Pose Estimation: YOLOv8-pose를 활용해 선수의 스켈레톤을 추출하고 코트 위 실시간 위치를 파악함.
+---
 
-Ironclad Physics Hits Detection: 단순 좌표 변화가 아닌 물리적 가속도와 방향 전환 분석을 통해 실제 타구 시점을 감지함. (영상 시작 1초 이내 초반 타점 포함)
+## API 사용법
 
-Smart Mini-map & Heatmap: 분석된 데이터를 바탕으로 코트 미니맵에 타구 순서와 선수의 이동 동선을 시각화함.
+```http
+POST /analyze
+Content-Type: application/json
 
-🛠 기술 스택
-Deep Learning: TrackNetV3, YOLOv8-pose (Ultralytics)
+{
+  "video_url": "s3://...",
+  "user_corners": [[x,y],[x,y],[x,y],[x,y]],  // 단식 코트 4점 (좌상·우상·우하·좌하)
+  "net_coords":   [[x,y],[x,y]]                // 네트 상단 좌·우 2점
+}
+```
 
-Computer Vision: OpenCV
+`user_corners` / `net_coords` 는 영상 픽셀 좌표이며 생략 시 자동 비율로 추정합니다.
 
-Data Analysis: Pandas, NumPy, SciPy (Peak Detection)
+---
 
-Environment: Google Colab, FFmpeg
+## 시각화 규격
 
-📊 분석 결과 (Output 예시)
-분석이 완료되면 다음과 같은 시각화 데이터가 포함된 영상을 생성
+### 색상 시스템
 
-메인 화면: 셔틀콕 추적 및 선수 포즈 렌더링
+| 요소 | 색상 | HEX |
+|---|---|---|
+| Top 선수 (화면 상단) | Royal Blue | `#3B82F6` |
+| Bottom 선수 (화면 하단) | Amber Gold | `#F59E0B` |
+| 단식 유효 구역 | Forest Green | `#327330` |
+| 복식 앨리 (단식 아웃) | Dark Green | `#1B401A` |
+| 네트 | Blue | `MINIMAP_CONFIG["net_color"]` |
 
-우측 상단: 타점 번호가 마킹된 코트 히트맵 (선수별 색상 구분)
+### BWF 코트 규격 (단위: m)
 
-하단 영역: 원근 변환(Homography)이 적용된 프로 코트 미니맵 및 궤적 잔상
+| 항목 | 값 |
+|---|---|
+| 코트 전장 | 13.40 |
+| 복식 폭 | 6.10 |
+| 단식 폭 | 5.18 (사이드라인 각 0.46 내측) |
+| 네트 위치 | 6.70 (중앙) |
+| 숏 서비스 라인 | 네트 ± 1.98 → 4.72 / 8.68 |
+| 복식 롱 서비스 라인 | 엔드 ± 0.76 → 0.76 / 12.64 |
+| 센터라인 | 숏 서비스 라인 → 엔드라인 (네트 구간 미포함) |
 
-⚙️ 실행 순서
-환경 세팅: TrackNetV3 소스 복제 및 가중치(Weights) 다운로드
+---
 
-영상 업로드: 분석할 배드민턴 경기 영상 (.mp4) 선택
+## 수정 이력
 
-데이터 추출: 셔틀콕 좌표 데이터 및 타점 분석 실행
+### feat/court-picker-pipeline
 
-렌더링: 미니맵과 히트맵이 합성된 최종 결과 영상 생성 및 다운로드
+#### 네트 상단 좌표 기반 물리 로직 교정
+- `net_coords`(Net-L, Net-R)를 네트 **최상단(Top edge)** 좌표로 재해석
+- `SkeletonCourtRenderer`에 `net_coords` 파라미터 추가
+- 셔틀콕과 **동일한 `_shifted_matrix`** 로 네트 상단을 투영 → 공과 네트의 전후/상하 관계 물리적 일치
+- `pipeline_service.py`에서 렌더러 초기화 시 `net_coords` 자동 전달
+
+#### 브랜드 색상 통일
+- Top 선수: 빨강 → **Royal Blue (#3B82F6)**
+- Bottom 선수: 파랑 → **Amber Gold (#F59E0B)**
+- IMPACT 텍스트 / 하이라이트 효과 → Royal Blue 계열
+- 네트 오버레이 색상 → Royal Blue
+- `config.py` 단일 진실 소스로 모든 파일 자동 동기화
+
+#### Two-tone Green 코트 채색
+- 단식 유효 구역: **Forest Green (#327330)**
+- 복식 앨리 (단식 아웃): **Dark Dark Green (#1B401A)**
+- 미니맵: `cv2.rectangle` fillPoly 방식
+- 스켈레톤 뷰: `cv2.fillPoly` perspective 폴리곤 방식
+
+#### BWF 규격 라인 수정
+- **센터라인**: 전장 관통 → 숏 서비스 라인↔엔드라인 2분할 (네트 구간 제외)
+- **숏 서비스 라인**: 단식 폭(0.46~5.64) → **복식 전폭(0~6.10)**
+
+#### 선수 ID 안정화
+- `PlayerStabilizer`: 화면 Y좌표 기반 Top/Bottom 강제 고정
+- 네트 근처 겹침 시에도 색상 스위칭 없음, 최대 3프레임 Ghost 유지
