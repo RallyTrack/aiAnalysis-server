@@ -4,11 +4,11 @@ RallyTrack AI 분석 라우터
 - POST /analyze : 백엔드에서 호출하는 영상 분석 엔드포인트
 - 분석 완료 후 minimap / skeleton 영상을 S3에 업로드하고 백엔드에 콜백
 """
-import json
 import os
 import httpx
 from fastapi import APIRouter, BackgroundTasks
 from pydantic import BaseModel
+from typing import Optional
 
 from config.settings import BACKEND_URL
 from services.video_service import download_video, cleanup_video
@@ -27,6 +27,18 @@ def _get_pipeline() -> RallyTrackPipeline:
     return _pipeline
 
 
+class CourtCornerPoint(BaseModel):
+    x: int
+    y: int
+
+
+class CourtCorners(BaseModel):
+    topLeft: CourtCornerPoint
+    topRight: CourtCornerPoint
+    bottomLeft: CourtCornerPoint
+    bottomRight: CourtCornerPoint
+
+
 class AnalyzeRequest(BaseModel):
     videoId: int
     s3Url: str
@@ -36,6 +48,8 @@ class AnalyzeRequest(BaseModel):
     # minimap (NEW)
     minimapUploadUrl: str = ""
     minimapVideoUrl: str = ""
+    # courtCorncers
+    courtCorners: Optional[CourtCorners] = None
 
 
 @router.post("/analyze")
@@ -53,6 +67,7 @@ def analyze_video(request: AnalyzeRequest, background_tasks: BackgroundTasks):
         request.skeletonVideoUrl,
         request.minimapUploadUrl,
         request.minimapVideoUrl,
+        request.courtCorners,
     )
     return {"message": "분석이 시작되었습니다.", "videoId": request.videoId}
 
@@ -97,6 +112,7 @@ def run_analysis(
     skeleton_video_url: str = "",
     minimap_upload_url: str = "",
     minimap_video_url: str = "",
+    court_corners=None,
 ):
     """
     실제 분석 파이프라인.
@@ -120,7 +136,7 @@ def run_analysis(
 
         # 2. RallyTrackPipeline 실행
         pipeline = _get_pipeline()
-        api_data = pipeline.run(local_path)
+        api_data = pipeline.run(local_path, court_corners)
         result_paths = api_data.pop("result_paths", {})
 
         # 3. S3 업로드 (skeleton + minimap)

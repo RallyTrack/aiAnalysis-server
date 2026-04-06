@@ -23,6 +23,7 @@ from .config import COURT_CORNERS, COURT_LINES, MINIMAP_CONFIG
 def compute_homographies(
     frame_w: int,
     frame_h: int,
+    court_corners=None,
     minimap_w: int = MINIMAP_CONFIG["width"],
     minimap_h: int = MINIMAP_CONFIG["height"],
 ) -> dict:
@@ -36,16 +37,24 @@ def compute_homographies(
         minimap_pts      : 미니맵 내 코트 코너 좌표 (4×2 float32)
         net_y_minimap    : 미니맵 내 네트 Y 좌표 (코트 정중앙)
     """
-    cc = COURT_CORNERS
     pad = MINIMAP_CONFIG["padding"]
 
-    # 영상 내 코트 코너 [좌상, 우상, 우하, 좌하]
-    src_pts = np.array([
-        [frame_w * cc["top_left"][0],     frame_h * cc["top_left"][1]],
-        [frame_w * cc["top_right"][0],    frame_h * cc["top_right"][1]],
-        [frame_w * cc["bottom_right"][0], frame_h * cc["bottom_right"][1]],
-        [frame_w * cc["bottom_left"][0],  frame_h * cc["bottom_left"][1]],
-    ], dtype=np.float32)
+    if court_corners is not None:
+        src_pts = np.array([
+            [court_corners.topLeft.x, court_corners.topLeft.y],
+            [court_corners.topRight.x, court_corners.topRight.y],
+            [court_corners.bottomRight.x, court_corners.bottomRight.y],
+            [court_corners.bottomLeft.x, court_corners.bottomLeft.y],
+        ], dtype=np.float32)
+    else:
+        # fallback: config.py 하드코딩 값 사용
+        cc = COURT_CORNERS
+        src_pts = np.array([
+            [frame_w * cc["top_left"][0], frame_h * cc["top_left"][1]],
+            [frame_w * cc["top_right"][0], frame_h * cc["top_right"][1]],
+            [frame_w * cc["bottom_right"][0], frame_h * cc["bottom_right"][1]],
+            [frame_w * cc["bottom_left"][0], frame_h * cc["bottom_left"][1]],
+        ], dtype=np.float32)
 
     # 미니맵 내 목적지 코너: 패딩을 제외한 직사각형
     dst_pts = np.array([
