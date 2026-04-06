@@ -155,7 +155,7 @@ class RallyTrackPipeline:
             self._pose_model = YOLO(PATHS["yolo_model"])
         return self._pose_model
 
-    def run(self, video_path: str) -> dict:
+    def run(self, video_path: str, court_corners=None) -> dict:
         """
         영상을 분석하고 타점 API 데이터를 반환합니다.
 
@@ -193,7 +193,7 @@ class RallyTrackPipeline:
 
         # ── Step 3: 호모그래피 ──────────────────────────────
         print("[Step 3] 호모그래피 계산")
-        hg = compute_homographies(frame_w, frame_h)
+        hg = compute_homographies(frame_w, frame_h, court_corners)
 
         # ── Step 4: 타점 감지 ────────────────────────────────
         print("[Step 4] 타점 감지")
