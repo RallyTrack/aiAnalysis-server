@@ -1,11 +1,21 @@
 """
-RallyTrack - 타점(Impact) 감지 모듈 v11 (Pose-first Owner 패러다임)
+RallyTrack - 타점(Impact) 감지 모듈 v12 (오탐지 제거 강화)
 
 [아키텍처]
   핵심 감지 로직은 원본(f4c000c 커밋)과 완전히 동일하게 유지한다.
   - impulse 계산: valid_idx 기준 앞뒤 2칸, future_idx 최소 3개 조건
   - peaks 검출: Tukey IQR 기반 robust max 임계값 (v7 핵심 변경)
   - owner 판정: Pose 우선 → crossing 보완 → alternation 최후 fallback (v11 전환)
+
+  v12 수정: 오탐지 제거 강화 — 근접 중복 피크 및 서브 정점 아크 오탐
+    1) _find_peaks: 점수 기반 NMS 추가 (_score_nms)
+       find_peaks(distance=d)의 경계 조건으로 d 이내 두 피크가 모두 살아남는 경우,
+       점수 비율(2.5:1)로 약한 쪽을 억제.
+       대상: #2 (서브 전 CSV 좌표 튐 중복), #10 (타격 직후 중복 검출)
+    2) _compute_impulse_scores: 서브 포물선 정점(apex) 필터 추가
+       v_in 이 위쪽 방향(v_in[1] < -2.0) + v_out 이 아래쪽 방향(v_out[1] > 2.0) +
+       수평 변화 없음(|v_out[0]-v_in[0]| < 4.0) → 자연 방향전환, 타격 아님 → 스킵
+       대상: #3 (서브 비행 정점에서 y 방향 역전으로 인한 오탐지)
 
   v11 수정: Owner 분류 패러다임 전환 — "놓치더라도 거짓말은 하지 말자"
     문제: alternation 교정이 중간 타격 누락 시 확실한 타점의 owner를 강제로 뒤집음
@@ -937,6 +947,33 @@ class ImpactDetector:
                         if min(y[idx] for idx in near_future) > y[i_curr] - min_floor_drop:
                             continue
 
+            # ── 서브 포물선 정점(apex) 필터 (v12 신규) ──────────
+            # [목적] 서브 비행 중 자연적인 수직 방향 전환(정점)에서
+            #        impulse가 실제 타격처럼 계산되는 오탐 방지.
+            # [조건] 세 조건 모두 만족 시 스킵 (AND 조건 → 매우 보수적):
+            #   1) 이전에 위쪽으로 이동 중: v_in[1] < -APEX_UP_THRESH
+            #      (이미지 좌표에서 y 감소 = 위쪽 이동)
+            #   2) 이후 아래쪽으로 이동:   v_out[1] > APEX_DOWN_THRESH
+            #      (y 증가 = 아래쪽 이동)
+            #   3) 수평 성분 변화 작음:    |v_out[0]-v_in[0]| < APEX_HORIZ_MAX
+            #      (외력 없이 중력만 작용 → 수평 속도 유지)
+            # [수학적 근거]
+            #   실제 타격: 라켓이 수평+수직 모두 속도 변경 → |Δv_x| ≥ 5~20 px/frame
+            #   자연 포물선 정점: 수평 무변화 → |Δv_x| < 2 px/frame
+            #   임계값 APEX_HORIZ_MAX=4.0: 실제 타격과 자연 정점 사이 충분한 여유.
+            # [Regression 안전]
+            #   언더핸드 클리어(올라가는 공을 위로 침):
+            #     v_out[1] < 0 (공이 위로 올라감) → 조건 2 미충족 → 보존 ✓
+            #   서브 이후 내려오는 공에 대한 스매시:
+            #     v_in[1] > 0 (공이 이미 내려오는 중) → 조건 1 미충족 → 보존 ✓
+            APEX_UP_THRESH   = 2.0  # v_in[1] 하한 (위쪽 이동 최소 속도)
+            APEX_DOWN_THRESH = 2.0  # v_out[1] 하한 (아래쪽 이동 최소 속도)
+            APEX_HORIZ_MAX   = 4.0  # 수평 변화 상한 (외력 없음 판정)
+            if (v_in[1] < -APEX_UP_THRESH
+                    and v_out[1] > APEX_DOWN_THRESH
+                    and abs(v_out[0] - v_in[0]) < APEX_HORIZ_MAX):
+                continue
+
             impulse = np.linalg.norm(v_out - v_in)
 
             if v_out[1] - v_in[1] > 10:
@@ -1045,6 +1082,30 @@ class ImpactDetector:
             prominence= 1.0,
             height    = threshold,
         )
+
+        # ── 근접 피크 점수 기반 NMS (v12 신규) ──────────────────
+        # [목적] find_peaks(distance=d)의 경계 조건으로 인해 d 이내
+        #        두 피크가 모두 살아남는 경우, 점수 비율로 약한 쪽을 억제.
+        # [대상]
+        #   #2 타입: 서브 전 CSV 좌표 튐 → 실제 서브와 6~7프레임 차이로 중복 감지
+        #   #10 타입: 타격 직후 추적 흔들림 → 동일 타격이 두 번 감지
+        # [기준]
+        #   NMS_FRAMES: 이 프레임 수 이내면 "근접"으로 간주 (9 = ~0.3s at 30fps)
+        #   NMS_SCORE_RATIO: 한쪽 점수가 이 배수 이상이면 낮은 쪽 억제 (2.5)
+        # [Regression 안전]
+        #   서브+리턴처럼 진짜 연속 타점: 두 점수가 비슷 → ratio < 2.5 → 둘 다 유지 ✓
+        #   오탐지+진짜 타점: 오탐지 score << 진짜 score → ratio > 2.5 → 오탐 억제 ✓
+        NMS_FRAMES      = 9    # 근접 판정 최대 프레임 수 (~0.3s at 30fps)
+        NMS_SCORE_RATIO = 2.5  # 억제 적용 점수 비율 임계값
+
+        if verbose:
+            print(f"  [NMS] before={peaks.tolist()}")
+
+        peaks = self._score_nms(peaks, work_scores, NMS_FRAMES, NMS_SCORE_RATIO)
+
+        if verbose:
+            print(f"  [NMS] after ={peaks.tolist()}")
+
         return peaks
 
     def _build_candidates(
@@ -1285,6 +1346,62 @@ class ImpactDetector:
         if dist >= self._ambiguity_band:
             return 1.0
         return dist / self._ambiguity_band
+
+    @staticmethod
+    def _score_nms(
+        peaks:       np.ndarray,
+        scores:      np.ndarray,
+        min_frames:  int,
+        score_ratio: float,
+    ) -> np.ndarray:
+        """
+        근접 피크 점수 기반 NMS (Non-Maximum Suppression).
+
+        두 피크가 min_frames 이내이고 한쪽 점수가 score_ratio배 이상이면
+        낮은 점수 피크를 억제한다. 점수가 비슷하면(ratio < score_ratio) 둘 다 유지.
+
+        [알고리즘]
+          프레임 순서로 정렬 후, 인접 쌍마다 검사:
+            - gap < min_frames AND score_i > score_j * ratio → j 억제
+            - gap < min_frames AND score_j > score_i * ratio → i 억제, 다음 i 로 이동
+            - 그 외(점수 비슷하거나 gap 충분) → 둘 다 유지
+
+        [Regression 안전]
+          진짜 연속 타점(서브+리턴, 8프레임 이내): 점수 비슷 → ratio < 2.5 → 유지 ✓
+          오탐지+진짜 타점: 오탐지 score << 진짜 score → 억제 ✓
+        """
+        if len(peaks) <= 1:
+            return peaks
+
+        peaks_sorted = np.sort(peaks)
+        keep = np.ones(len(peaks_sorted), dtype=bool)
+
+        i = 0
+        while i < len(peaks_sorted):
+            if not keep[i]:
+                i += 1
+                continue
+            j = i + 1
+            while j < len(peaks_sorted):
+                if not keep[j]:
+                    j += 1
+                    continue
+                gap = int(peaks_sorted[j]) - int(peaks_sorted[i])
+                if gap >= min_frames:
+                    break
+                si = float(scores[peaks_sorted[i]])
+                sj = float(scores[peaks_sorted[j]])
+                if si >= sj * score_ratio:
+                    # i 점수가 압도적으로 높음 → j 억제
+                    keep[j] = False
+                elif sj >= si * score_ratio:
+                    # j 점수가 압도적으로 높음 → i 억제, i 루프 종료
+                    keep[i] = False
+                    break
+                j += 1
+            i += 1
+
+        return peaks_sorted[keep]
 
     # ── 포즈 데이터 유틸 ─────────────────────────────────────
 
