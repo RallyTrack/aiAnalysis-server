@@ -55,9 +55,13 @@ def run_tracknet(video_path: str) -> str:
     os.makedirs(PATHS["prediction_dir"], exist_ok=True)
 
     predict_script = os.path.join(PATHS["tracknet_dir"], "predict.py")
+    # predict.py 89번 줄: video_name = video_file.split('/')[-1][:-4]
+    # Windows 절대 경로(\)를 그대로 넘기면 split('/')가 전체 경로를 video_name으로 잘못 추출.
+    # → forward slash로 변환해서 넘겨야 prediction/ 폴더에 올바르게 저장됨.
+    video_path_fwd = video_path.replace("\\", "/")
     cmd = [
         sys.executable, predict_script,
-        "--video_file",      video_path,
+        "--video_file",      video_path_fwd,
         "--tracknet_file",   PATHS["tracknet_ckpt"],
         "--inpaintnet_file", PATHS["inpaintnet_ckpt"],
         "--batch_size",      str(TRACKNET_CONFIG["batch_size"]),
