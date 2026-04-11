@@ -114,6 +114,25 @@ Content-Type: application/json
 
 ### feat/court-picker-pipeline
 
+#### 타점 감지 v12 — 오탐지 제거 및 rescue 로직 개선
+
+**근접 피크 NMS (`_score_nms`)**
+- `find_peaks(distance=d)` 경계 조건으로 d 이내 두 피크가 모두 통과하던 문제 해결
+- 9프레임(≈0.3s) 이내 두 피크 → 점수 높은 쪽만 유지 (ratio 조건 없음)
+- 배드민턴에서 0.3초 이내 두 번 타격은 물리적으로 불가능하므로 무조건 오탐으로 처리
+
+**서브 포물선 정점(apex) 필터**
+- 서브 비행 중 자연적인 수직 방향 전환(정점)을 타격으로 오인하는 문제 해결
+- 조건: 위로 이동(v_in[1] < -2) + 아래로 반전(v_out[1] > 2) + 수평 변화 없음(|Δv_x| < 4) → 스킵
+- 실제 타격은 라켓이 수평+수직 모두 변경 → |Δv_x| ≥ 5+ → 보존
+
+**IQR-억제 near-miss 후보 제외**
+- IQR-억제 프레임(TrackNet ID 스위치 노이즈)을 near-miss 후보에서 완전 제거
+- 기존(v11): IQR 억제 프레임을 포즈로 재검증 → ID 스위치 구간의 선수 손목이 공 위치 근처에 있으면 오탐 삽입
+- 수정(v12): IQR 억제 = 노이즈 원인이므로 rescue 대상에서 제외
+
+---
+
 #### 네트 상단 좌표 기반 물리 로직 교정
 - `net_coords`(Net-L, Net-R)를 네트 **최상단(Top edge)** 좌표로 재해석
 - `SkeletonCourtRenderer`에 `net_coords` 파라미터 추가

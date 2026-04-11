@@ -1083,25 +1083,28 @@ class ImpactDetector:
             height    = threshold,
         )
 
-        # ── 근접 피크 점수 기반 NMS (v12 신규) ──────────────────
-        # [목적] find_peaks(distance=d)의 경계 조건으로 인해 d 이내
-        #        두 피크가 모두 살아남는 경우, 점수 비율로 약한 쪽을 억제.
+        # ── 근접 피크 NMS (v12 신규, v12.1 ratio 조건 제거) ────
+        # [목적] find_peaks(distance=d) 경계 조건으로 NMS_FRAMES 이내
+        #        두 피크가 모두 살아남는 경우, 높은 점수만 유지.
         # [대상]
-        #   #2 타입: 서브 전 CSV 좌표 튐 → 실제 서브와 6~7프레임 차이로 중복 감지
-        #   #10 타입: 타격 직후 추적 흔들림 → 동일 타격이 두 번 감지
+        #   #2 타입: 서브 전 CSV 좌표 튐 → 실제 서브와 6~7프레임 차이 중복
+        #   #10 타입: 타격 직후 추적 흔들림 → 동일 타격 이중 감지
         # [기준]
-        #   NMS_FRAMES: 이 프레임 수 이내면 "근접"으로 간주 (9 = ~0.3s at 30fps)
-        #   NMS_SCORE_RATIO: 한쪽 점수가 이 배수 이상이면 낮은 쪽 억제 (2.5)
+        #   NMS_FRAMES: 이 프레임 수 이내 = "근접" → 높은 점수만 생존
+        #   9프레임 ≈ 0.3초 at 30fps
         # [Regression 안전]
-        #   서브+리턴처럼 진짜 연속 타점: 두 점수가 비슷 → ratio < 2.5 → 둘 다 유지 ✓
-        #   오탐지+진짜 타점: 오탐지 score << 진짜 score → ratio > 2.5 → 오탐 억제 ✓
-        NMS_FRAMES      = 9    # 근접 판정 최대 프레임 수 (~0.3s at 30fps)
-        NMS_SCORE_RATIO = 2.5  # 억제 적용 점수 비율 임계값
+        #   배드민턴에서 0.3초 이내 두 번의 실제 타격은 물리적으로 불가능.
+        #   (라켓 스윙 + 셔틀 비행 시간 최소 0.4~0.5초 필요)
+        #   → NMS_FRAMES 이내라면 무조건 오탐이므로 ratio 조건 불필요.
+        # [v12 → v12.1 변경 이유]
+        #   ratio 조건(2.5배)이 있으면 오탐 피크 점수 ≥ 실제 타격 점수인 경우
+        #   억제가 안 됨 (CSV 좌표 튐이 더 큰 impulse를 만들 수 있음).
+        NMS_FRAMES = 9    # 근접 판정 최대 프레임 수 (~0.3s at 30fps)
 
         if verbose:
             print(f"  [NMS] before={peaks.tolist()}")
 
-        peaks = self._score_nms(peaks, work_scores, NMS_FRAMES, NMS_SCORE_RATIO)
+        peaks = self._score_nms(peaks, work_scores, NMS_FRAMES)
 
         if verbose:
             print(f"  [NMS] after ={peaks.tolist()}")
@@ -1349,26 +1352,21 @@ class ImpactDetector:
 
     @staticmethod
     def _score_nms(
-        peaks:       np.ndarray,
-        scores:      np.ndarray,
-        min_frames:  int,
-        score_ratio: float,
+        peaks:      np.ndarray,
+        scores:     np.ndarray,
+        min_frames: int,
     ) -> np.ndarray:
         """
-        근접 피크 점수 기반 NMS (Non-Maximum Suppression).
+        근접 피크 NMS (Non-Maximum Suppression).
 
-        두 피크가 min_frames 이내이고 한쪽 점수가 score_ratio배 이상이면
-        낮은 점수 피크를 억제한다. 점수가 비슷하면(ratio < score_ratio) 둘 다 유지.
+        두 피크가 min_frames 이내이면 높은 점수만 남긴다.
+        점수 비율 조건 없음 — 0.3초 이내 두 타격은 물리적으로 불가능하므로
+        무조건 오탐으로 간주하고 낮은 쪽을 억제한다.
 
         [알고리즘]
-          프레임 순서로 정렬 후, 인접 쌍마다 검사:
-            - gap < min_frames AND score_i > score_j * ratio → j 억제
-            - gap < min_frames AND score_j > score_i * ratio → i 억제, 다음 i 로 이동
-            - 그 외(점수 비슷하거나 gap 충분) → 둘 다 유지
-
-        [Regression 안전]
-          진짜 연속 타점(서브+리턴, 8프레임 이내): 점수 비슷 → ratio < 2.5 → 유지 ✓
-          오탐지+진짜 타점: 오탐지 score << 진짜 score → 억제 ✓
+          프레임 순서로 정렬 후, 살아있는 피크를 순서대로 확인:
+            gap < min_frames → 낮은 점수 쪽 억제 (동점이면 뒤쪽 억제)
+            gap ≥ min_frames → 둘 다 유지, 다음 쌍으로 이동
         """
         if len(peaks) <= 1:
             return peaks
@@ -1391,11 +1389,11 @@ class ImpactDetector:
                     break
                 si = float(scores[peaks_sorted[i]])
                 sj = float(scores[peaks_sorted[j]])
-                if si >= sj * score_ratio:
-                    # i 점수가 압도적으로 높음 → j 억제
+                if si >= sj:
+                    # i 점수가 같거나 높음 → j 억제
                     keep[j] = False
-                elif sj >= si * score_ratio:
-                    # j 점수가 압도적으로 높음 → i 억제, i 루프 종료
+                else:
+                    # j 점수가 높음 → i 억제, i 루프 종료
                     keep[i] = False
                     break
                 j += 1
@@ -1670,16 +1668,21 @@ class ImpactDetector:
                 continue
             near_misses.add(int(i))
 
-        # ── IQR 억제 프레임 추가 (v11) ─────────────────────────
-        # score > upper_fence 여서 IQR에 의해 0으로 억제된 프레임.
-        # 이 프레임들은 "물리 필터를 통과했으나 너무 높은 score → 노이즈로 의심"이다.
-        # 서브 리턴처럼 TrackNet ID스위칭 잡음이 섞인 타점은 impulse가 폭발적으로 높아져
-        # IQR 억제 대상이 된다 → 포즈로 진짜/가짜를 가려야 한다.
-        iqr_suppressed = getattr(self, "_last_iqr_suppressed", [])
-        for i in iqr_suppressed:
-            too_close = any(abs(i - cf) <= exclusion_radius for cf in confirmed_vicinity)
-            if not too_close:
-                near_misses.add(int(i))
+        # ── IQR 억제 프레임은 near-miss 후보에서 제외 (v12) ──────
+        # [v11 삭제 이유]
+        # IQR-억제 프레임(score > Q3+3·IQR)은 대부분 TrackNet ID스위치 노이즈가
+        # 원인이다. 노이즈 프레임 근방에는 실제 선수가 서브 동작 중인 경우가 많아
+        # YOLO가 손목-셔틀 근접을 잘못 확인 → rescue_near_misses가 오탐을 삽입한다.
+        #
+        # 구체적 사례: 서브 전 ID스위치(frame 20, x=250→700→250)로 frame 20 IQR억제.
+        # fps=24 기준 frame 20 = 0.833s. 서브 동작 중 선수 손목이 공 위치(x=250)
+        # 근처에 있어 YOLO 확인 통과 → 잘못된 0.833s 타점 삽입.
+        #
+        # IQR-억제 프레임의 근본 원인은 노이즈이지 "약한 실제 타격"이 아니다.
+        # 진짜 서브 리턴이 IQR-억제되는 경우는 극히 드물고, 그런 경우에도
+        # 이미 _compute_adaptive_params가 완화 파라미터를 적용해 정상 감지됨.
+        #
+        # → IQR-억제 프레임은 near-miss 후보에 포함하지 않는다.
 
         return sorted(near_misses)
 
