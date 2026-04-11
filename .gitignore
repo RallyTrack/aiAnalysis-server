@@ -38,3 +38,6 @@ prediction/
 
 # TrackNetV3 모델 소스 (별도 관리)
 TrackNetV3/
+
+# Claude AI 관련 파일
+.claude/

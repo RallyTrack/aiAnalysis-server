@@ -289,7 +289,7 @@ def collect_court_points(video_path: str):
     return user_corners, net_coords
 
 
-def test_pipeline(video_path: str, skip_tracknet: bool = False):
+def test_pipeline(video_path: str, skip_tracknet: bool = False, verbose: bool = False):
     """4단계: 전체 파이프라인 실행 테스트 (실제 영상 필요)"""
     import os
     from services.pipeline_service import RallyTrackPipeline
@@ -297,6 +297,7 @@ def test_pipeline(video_path: str, skip_tracknet: bool = False):
     print(f"\n[4단계] 전체 파이프라인 테스트")
     print(f"  영상: {video_path}")
     print(f"  skip_tracknet: {skip_tracknet}")
+    print(f"  verbose: {verbose}")
 
     # ── 코트 좌표 수집 (필수) ──────────────────────────────────
     print("\n  파이프라인 시작 전 코트 좌표를 입력합니다.")
@@ -308,6 +309,7 @@ def test_pipeline(video_path: str, skip_tracknet: bool = False):
             video_path,
             user_corners=user_corners,
             net_coords=net_coords,
+            verbose=verbose,
         )
 
         result_paths = api_data.pop("result_paths", {})
@@ -335,6 +337,7 @@ def main():
     parser = argparse.ArgumentParser(description="RallyTrack analysis/ 독립 테스트")
     parser.add_argument("--video", "-v", default=None, help="테스트할 영상 경로 (없으면 1~3단계만 실행)")
     parser.add_argument("--skip-tracknet", action="store_true", help="TrackNet 생략 (CSV 이미 있을 때)")
+    parser.add_argument("--verbose", action="store_true", help="ImpactDetector 중간 진단 출력")
     args = parser.parse_args()
 
     print("=" * 55)
@@ -351,7 +354,7 @@ def main():
             print(f"\n[4단계] 영상 파일 없음: {args.video}")
             results["pipeline"] = False
         else:
-            results["pipeline"] = test_pipeline(args.video, args.skip_tracknet)
+            results["pipeline"] = test_pipeline(args.video, args.skip_tracknet, args.verbose)
     else:
         print("\n[4단계] --video 옵션 없음 → 파이프라인 테스트 생략")
 
