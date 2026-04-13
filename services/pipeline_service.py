@@ -32,7 +32,9 @@ import pandas as pd
 from ultralytics import YOLO
 
 from analysis.config        import PATHS, TRACKNET_CONFIG, MINIMAP_CONFIG, POSE_CONFIG
-from analysis.court         import compute_homographies
+from analysis.court         import (
+    compute_homographies, classify_drop_location, frame_to_minimap,
+)
 from analysis.impact        import ImpactDetector, to_api_json
 from analysis.minimap       import MinimapRenderer
 from analysis.net_judge     import NetCrossingEvent, NetFaultEvent, NetJudge
@@ -374,6 +376,69 @@ class RallyTrackPipeline:
         if verbose:
             print(f"[Step 4.6] 교대 교정 완료 → {len(hit_events)}개")
 
+        # ── Step 4.7: In/Out 판정 (랠리 종료 낙하 지점) ────────
+        rally_drops = self._find_rally_drops(hit_events, x_arr, y_arr, fps)
+        drop_results = []   # 판정 결과 (JSON 출력용)
+        drop_by_frame = {}  # {frame: {...}} — 프레임 루프에서 빠른 조회
+
+        if rally_drops:
+            print(f"[Step 4.7] In/Out 판정 ({len(rally_drops)}건)")
+            for i, drop in enumerate(rally_drops):
+                minimap_pt = frame_to_minimap(
+                    (drop["sx"], drop["sy"]), hg["to_minimap"]
+                )
+                result = classify_drop_location(
+                    hg["minimap_pts"], hg["net_y_minimap"], minimap_pt
+                )
+
+                is_in = result["location"] != "out"
+                label = "IN" if is_in else "OUT"
+                loc_kr = {"in_top": "상단 코트", "in_bottom": "하단 코트", "out": "아웃"}
+
+                margin = result["margin_cm"]
+                if margin >= 0:
+                    dist_str = f"{result['nearest_line']}까지 약 {margin:.1f}cm"
+                else:
+                    dist_str = f"{result['nearest_line']} 밖 약 {abs(margin):.1f}cm"
+
+                print(
+                    f"  [In/Out 판정] 결과: {label} ({loc_kr[result['location']]}) "
+                    f"| {dist_str} "
+                    f"(좌표: {drop['sx']:.0f}, {drop['sy']:.0f})"
+                )
+
+                drop_entry = {
+                    **drop,
+                    "is_in":    is_in,
+                    "result":   result,
+                    "rally_idx": i + 1,
+                }
+                drop_results.append(drop_entry)
+
+        if drop_results:
+            # ── 각 랠리의 X마크 지속 범위 계산 ──────────────────
+            # 다음 랠리 시작 프레임 목록: hit_events 사이의 3초+ 갭 지점
+            RALLY_GAP_SEC = 3.0
+            next_rally_starts: list[int] = []
+            for k in range(1, len(hit_events)):
+                gap = (hit_events[k].frame - hit_events[k - 1].frame) / max(fps, 1)
+                if gap > RALLY_GAP_SEC:
+                    next_rally_starts.append(hit_events[k].frame)
+
+            for drop_entry in drop_results:
+                drop_frame = drop_entry["frame"]
+                # 이 드롭 이후 처음 오는 다음 랠리 시작 프레임 탐색
+                persist_end = n_frames  # 마지막 랠리 → 영상 끝까지 유지
+                for rs in next_rally_starts:
+                    if rs > drop_frame:
+                        persist_end = rs
+                        break
+                # drop 프레임부터 다음 랠리 직전까지 등록
+                for f in range(drop_frame, persist_end):
+                    drop_by_frame[f] = drop_entry
+        else:
+            print("[Step 4.7] In/Out 판정 — 낙하 감지 없음")
+
         # 렌더링에서 빠른 조회를 위한 세트
         hit_frames   = {e.frame for e in hit_events}
         fault_frames = {e.frame for e in net_fault_events}
@@ -461,6 +526,14 @@ class RallyTrackPipeline:
             skeleton_canvas = skeleton_renderer.render_frame(
                 frame_idx, sx, sy, keypoints_list
             )
+
+            # 낙하 지점 X 마크 (drop 프레임 이후 ~1.5초 지속)
+            if frame_idx in drop_by_frame:
+                d = drop_by_frame[frame_idx]
+                skeleton_renderer.draw_drop_mark(
+                    skeleton_canvas, d["sx"], d["sy"], d["is_in"]
+                )
+
             out_3.write(skeleton_canvas)
 
             frame_idx += 1
@@ -486,6 +559,20 @@ class RallyTrackPipeline:
         api_data  = to_api_json(hit_events, fps)
         api_data["net_fault_events"]  = [e.to_dict() for e in net_fault_events]
         api_data["coordinate_mode"]   = hg["coordinate_mode"]
+        api_data["drop_judgments"]     = [
+            {
+                "rally_idx":       d["rally_idx"],
+                "frame":           d["frame"],
+                "location":        d["result"]["location"],
+                "margin_cm":       d["result"]["margin_cm"],
+                "nearest_line":    d["result"]["nearest_line"],
+                "bwf_x":           d["result"]["bwf_x"],
+                "bwf_y":           d["result"]["bwf_y"],
+                "last_hit_number": d["last_hit_number"],
+                "last_hit_owner":  d["last_hit_owner"],
+            }
+            for d in drop_results
+        ]
 
         json_path = os.path.join(rd, f"{video_name}_hits.json")
         with open(json_path, "w", encoding="utf-8") as fh:
@@ -556,6 +643,202 @@ class RallyTrackPipeline:
 
         cap.release()
         return result
+
+    # ────────────────────────────────────────────────────────
+    @staticmethod
+    def _find_rally_drops(
+        hit_events: list,
+        x_arr: np.ndarray,
+        y_arr: np.ndarray,
+        fps: float,
+    ) -> list:
+        """
+        각 랠리의 마지막 타점 이후 셔틀콕 **착지** 프레임을 찾는다.
+
+        랠리 분리: 연속 타점 간 gap > RALLY_GAP_SEC → 별도 랠리.
+        착지 감지: ``_find_landing_frame()`` — 궤적 방향 급변(바운스) 직전 프레임.
+
+        Returns:
+            [{"frame", "sx", "sy", "last_hit_number", "last_hit_owner"}, ...]
+        """
+        if not hit_events:
+            return []
+
+        RALLY_GAP_SEC  = 3.0
+        MAX_SEARCH_SEC = 5.0
+        n = len(x_arr)
+
+        # ── 각 랠리의 마지막 타점 인덱스 ──────────────────────
+        last_hit_indices: list[int] = []
+        for i in range(len(hit_events)):
+            is_last = (i == len(hit_events) - 1)
+            if not is_last:
+                gap = (hit_events[i + 1].frame - hit_events[i].frame) / max(fps, 1)
+                if gap > RALLY_GAP_SEC:
+                    is_last = True
+            if is_last:
+                last_hit_indices.append(i)
+
+        drops: list[dict] = []
+        for idx in last_hit_indices:
+            hit = hit_events[idx]
+            # 타점 직후 몇 프레임은 라켓 접촉 노이즈 → 건너뛰기
+            skip         = max(3, int(fps * 0.1))
+            search_start = hit.frame + skip
+            search_end   = min(hit.frame + int(fps * MAX_SEARCH_SEC), n)
+
+            landing = RallyTrackPipeline._find_landing_frame(
+                x_arr, y_arr, search_start, search_end,
+            )
+            if landing is not None:
+                frame, sx, sy = landing
+                drops.append({
+                    "frame":           frame,
+                    "sx":              sx,
+                    "sy":              sy,
+                    "last_hit_number": hit.hit_number,
+                    "last_hit_owner":  hit.owner,
+                })
+
+        return drops
+
+    @staticmethod
+    def _find_landing_frame(
+        x_arr: np.ndarray,
+        y_arr: np.ndarray,
+        start_frame: int,
+        search_end: int,
+    ):
+        """
+        셔틀콕 착지 프레임을 궤적 물리 분석으로 찾는다.
+
+        [탑뷰(프로) / 쿼터뷰(아마) 공통 대응]
+
+        핵심 설계:
+          비중첩(non-overlapping) 윈도우로 바운스 전/후 속도 벡터를 계산.
+
+          이전 버전(겹치는 smoothed_vel)의 문제:
+            smoothed_vel(i-1)과 smoothed_vel(i+1)이 i 주변 구간을 공유해
+            바운스 전/후 방향이 혼합 → 실제 각도가 축소 → 아마추어 영상 미감지.
+
+          비중첩 방식:
+            before_vel : pts[i - W_BEFORE ~ i-1] 구간만 사용
+            after_vel  : pts[i+1 ~ i + W_AFTER] 구간만 사용
+            → 바운스 전/후 방향이 깨끗하게 분리, 실제 각도 정확히 포착.
+            → 네트 부근 TrackNet 1~2프레임 오류는 W=3 평균으로 희석.
+
+          탐지 조건:
+            방향 변화 > 80° AND 속도 < 이전의 70%
+            · 네트 통과: 방향 변화 ≤60°, 속도 거의 유지 → 미감지
+            · 실제 바운스: 방향 >80° 반전 + 속도 급감 → 감지
+
+          fallback:
+            바운스 미감지(탑뷰에서 착지가 2D에 잘 안 보이는 경우) →
+            첫 번째 큰 추적 갭(>4프레임) 직전 프레임.
+
+        Returns:
+            (frame, x, y) 또는 None
+        """
+        BOUNCE_ANGLE = 80    # 방향 전환 임계각
+        SPEED_RATIO  = 0.70  # 착지 확정: 바운스 후 속도가 이전의 70% 이하
+        W_BEFORE     = 3     # 착지 직전 평균 구간 길이
+        W_AFTER      = 3     # 착지 직후 평균 구간 길이
+        GAP_THRESH   = 4     # 연속 미감지 프레임 수 > 이 값 → 궤적 종료 신호
+
+        n   = min(search_end, len(x_arr))
+        pts: list = []
+        for f in range(start_frame, n):
+            if x_arr[f] > 0 and y_arr[f] > 0:
+                pts.append((f, float(x_arr[f]), float(y_arr[f])))
+
+        if not pts:
+            return None
+
+        # ── 공용 fallback: 첫 번째 큰 추적 갭 직전 프레임 ───
+        def first_before_gap():
+            for k in range(1, len(pts)):
+                if pts[k][0] - pts[k - 1][0] > GAP_THRESH:
+                    return pts[k - 1]
+            return pts[-1]
+
+        if len(pts) < W_BEFORE + W_AFTER + 1:
+            return first_before_gap()
+
+        # ── 1차: 비중첩 윈도우 방향 급변 + 속도 감소 감지 ───
+        for i in range(W_BEFORE, len(pts) - W_AFTER):
+            # before: pts[i-W_BEFORE] → pts[i-1]  (착지 직전 구간)
+            i0b = max(0, i - W_BEFORE)
+            i1b = i - 1
+            if i1b <= i0b:
+                continue
+            dt_b = max(pts[i1b][0] - pts[i0b][0], 1)
+            vxb  = (pts[i1b][1] - pts[i0b][1]) / dt_b
+            vyb  = (pts[i1b][2] - pts[i0b][2]) / dt_b
+            spd_b = (vxb ** 2 + vyb ** 2) ** 0.5
+
+            if spd_b < 1e-6:
+                continue
+
+            # after: pts[i+1] → pts[i+W_AFTER]  (착지 직후 구간)
+            i0a = i + 1
+            i1a = min(len(pts) - 1, i + W_AFTER)
+            if i1a <= i0a:
+                continue
+            dt_a = max(pts[i1a][0] - pts[i0a][0], 1)
+            vxa  = (pts[i1a][1] - pts[i0a][1]) / dt_a
+            vya  = (pts[i1a][2] - pts[i0a][2]) / dt_a
+            spd_a = (vxa ** 2 + vya ** 2) ** 0.5
+
+            cos_a = float(np.clip(
+                (vxb * vxa + vyb * vya) / (spd_b * max(spd_a, 1e-6)),
+                -1.0, 1.0,
+            ))
+            angle = float(np.degrees(np.arccos(cos_a)))
+
+            # 방향 급변 AND 속도 급감 → 착지 후보 감지
+            if angle > BOUNCE_ANGLE and spd_a < spd_b * SPEED_RATIO:
+                # ── 정제: 조건이 유지되는 마지막 프레임으로 전진 ─
+                # before 윈도우에 post-bounce 프레임이 섞일수록 각도 축소 →
+                # 조건 미충족 시점 직전이 실제 착지 프레임에 가장 가깝다
+                last_valid = i
+                for j in range(i + 1, min(i + 6, len(pts) - W_AFTER)):
+                    i0b_j  = max(0, j - W_BEFORE)
+                    i1b_j  = j - 1
+                    if i1b_j <= i0b_j:
+                        break
+
+                    dt_bj  = max(pts[i1b_j][0] - pts[i0b_j][0], 1)
+                    vxbj   = (pts[i1b_j][1] - pts[i0b_j][1]) / dt_bj
+                    vybj   = (pts[i1b_j][2] - pts[i0b_j][2]) / dt_bj
+                    spd_bj = (vxbj ** 2 + vybj ** 2) ** 0.5
+
+                    i0a_j  = j + 1
+                    i1a_j  = min(len(pts) - 1, j + W_AFTER)
+                    if i1a_j <= i0a_j:
+                        break
+
+                    dt_aj  = max(pts[i1a_j][0] - pts[i0a_j][0], 1)
+                    vxaj   = (pts[i1a_j][1] - pts[i0a_j][1]) / dt_aj
+                    vyaj   = (pts[i1a_j][2] - pts[i0a_j][2]) / dt_aj
+                    spd_aj = (vxaj ** 2 + vyaj ** 2) ** 0.5
+
+                    if spd_bj < 1e-6:
+                        break
+
+                    cos_aj = float(np.clip(
+                        (vxbj * vxaj + vybj * vyaj) / (spd_bj * max(spd_aj, 1e-6)),
+                        -1.0, 1.0,
+                    ))
+                    if (float(np.degrees(np.arccos(cos_aj))) > BOUNCE_ANGLE
+                            and spd_aj < spd_bj * SPEED_RATIO):
+                        last_valid = j
+                    else:
+                        break
+
+                return pts[last_valid]
+
+        # ── 2차: 첫 번째 큰 추적 갭 직전 프레임 ─────────────
+        return first_before_gap()
 
     # ────────────────────────────────────────────────────────
     @staticmethod

@@ -260,6 +260,36 @@ class SkeletonCourtRenderer:
         cv2.line(canvas, m_l,  nt_l, NET_C, 3)
         cv2.line(canvas, m_r,  nt_r, NET_C, 3)
 
+    # ── 낙하 지점 X 마크 ───────────────────────────────────────
+
+    def draw_drop_mark(
+        self,
+        canvas:   np.ndarray,
+        frame_sx: float,
+        frame_sy: float,
+        is_in:    bool,
+    ) -> None:
+        """
+        셔틀콕 낙하 지점에 X 마크를 스켈레톤 캔버스 위에 그린다.
+
+        Args:
+            canvas:   렌더링 대상 캔버스.
+            frame_sx: 원본 영상 기준 셔틀콕 x 좌표.
+            frame_sy: 원본 영상 기준 셔틀콕 y 좌표.
+            is_in:    True이면 IN(초록), False이면 OUT(빨강).
+        """
+        pt  = np.array([[[frame_sx, frame_sy]]], dtype=np.float32)
+        res = cv2.perspectiveTransform(pt, self._shifted_matrix)[0][0]
+        cx, cy = int(res[0]), int(res[1])
+
+        color = (0, 255, 128) if is_in else (0, 0, 255)
+        size  = 22
+        thick = 4
+        cv2.line(canvas, (cx - size, cy - size), (cx + size, cy + size),
+                 color, thick, cv2.LINE_AA)
+        cv2.line(canvas, (cx - size, cy + size), (cx + size, cy - size),
+                 color, thick, cv2.LINE_AA)
+
     # ── 공개 렌더 메서드 ──────────────────────────────────────
 
     def render_frame(
