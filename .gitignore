@@ -35,3 +35,9 @@ result/
 
 # TrackNet CSV 예측 결과 — 재실행 시 자동 생성
 prediction/
+
+# TrackNetV3 모델 소스 (별도 관리)
+TrackNetV3/
+
+# Claude AI 관련 파일
+.claude/
