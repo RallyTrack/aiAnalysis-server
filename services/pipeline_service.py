@@ -165,6 +165,73 @@ def _draw_fault_overlay(frame: np.ndarray, label: str = "NET FAULT") -> None:
 
 
 # ────────────────────────────────────────────────────────────
+# 타격 owner 단순 교대 재할당
+# ────────────────────────────────────────────────────────────
+
+def _reassign_owners_alternating(
+    events: list,
+    y_arr: np.ndarray,
+    fps: float,
+    owner_y: float,
+    rally_gap_sec: float = 3.0,
+) -> list:
+    """
+    각 랠리의 첫 타점 owner를 결정하고 이후 타점은 top ↔ bottom 교대로 재할당한다.
+
+    첫 hitter 결정:
+      Step 4.5(포즈 교정)의 결과를 그대로 사용한다.
+      - peaks_crossed 포함 모든 타점에 포즈가 적용되므로 (apply_pose_owner skip 제거)
+        first_ev.owner가 가장 신뢰할 수 있는 값이다.
+      - 포즈 데이터가 없어 교정이 안 된 경우 → 셔틀 Y 위치 fallback
+
+    Args:
+        events       : ImpactEvent 리스트 (hit_number 이미 부여된 상태, Step 4.5 교정 포함)
+        y_arr        : 프레임별 셔틀콕 Y 좌표 배열
+        fps          : 영상 FPS (랠리 갭 계산용)
+        owner_y      : top/bottom 구분 Y 기준 (px)
+        rally_gap_sec: 이 값(초) 초과 갭이면 새 랠리 시작
+        crossings    : 미사용 (API 호환성 유지)
+    """
+    if not events:
+        return events
+
+    evs = list(events)
+    rally_start = 0
+
+    while rally_start < len(evs):
+        # ── 이 랠리의 끝 인덱스 탐색 ──────────────────────────
+        rally_end = rally_start
+        while rally_end + 1 < len(evs):
+            gap = (evs[rally_end + 1].frame - evs[rally_end].frame) / max(fps, 1)
+            if gap > rally_gap_sec:
+                break
+            rally_end += 1
+
+        rally_first_frame = evs[rally_start].frame
+        first_ev          = evs[rally_start]
+
+        # Step 4.5 포즈 교정 결과를 그대로 사용
+        # apply_pose_owner가 peaks_crossed 포함 모든 타점에 적용되므로
+        # first_ev.owner가 가장 신뢰할 수 있는 값이다.
+        cur_owner = first_ev.owner if first_ev.owner in ("top", "bottom") else None
+
+        # Fallback: 포즈 데이터 완전 부재로 owner 미설정 시 셔틀 Y 위치 사용
+        if cur_owner is None:
+            fy = float(y_arr[min(rally_first_frame, len(y_arr) - 1)])
+            cur_owner = "top" if fy < owner_y else "bottom"
+
+        # ── 랠리 내 교대 할당 ──────────────────────────────────
+        for k in range(rally_start, rally_end + 1):
+            evs[k].owner  = cur_owner
+            evs[k].player = "top" if cur_owner == "top" else "bottom"
+            cur_owner = "bottom" if cur_owner == "top" else "top"
+
+        rally_start = rally_end + 1
+
+    return evs
+
+
+# ────────────────────────────────────────────────────────────
 # 메인 파이프라인 클래스
 # ────────────────────────────────────────────────────────────
 
@@ -367,14 +434,15 @@ class RallyTrackPipeline:
                         print(f"           → near-miss 복구: +{rescued}개 "
                               f"(총 {len(hit_events)}개)")
 
-        # ── Step 4.6: 포즈 교정 완료 후 교대 교정 실행 ──────────
-        # [v11] detect()에서 run_alternation=False로 호출했으므로,
-        # 포즈 교정(Step 4.5A)과 rescue(4.5B)가 완전히 끝난 뒤 한 번만 실행.
-        # 이 시점엔 포즈 확정 타점(method에 "_pose"/"rescue_pose" 포함)이
-        # _correct_owner_alternation 내에서 flip 금지 처리된다.
-        hit_events = detector._correct_owner_alternation(hit_events, y_arr)
-        if verbose:
-            print(f"[Step 4.6] 교대 교정 완료 → {len(hit_events)}개")
+        # ── Step 4.6: 단순 교대 owner 재할당 ────────────────────
+        # 첫 타점 owner: Step 4.5 포즈 교정 결과(손목-셔틀 거리) 신뢰
+        # 이후 타점은 top ↔ bottom 교대 (YOLO 포즈 감지가 일부 실패해도 보정)
+        _owner_y_ref = (
+            owner_y_threshold if owner_y_threshold is not None
+            else frame_h * net_y_ratio
+        )
+        hit_events = _reassign_owners_alternating(hit_events, y_arr, fps, _owner_y_ref)
+        print(f"[Step 4.6] 교대 owner 재할당 완료 → {len(hit_events)}개")
 
         # ── Step 4.7: In/Out 판정 (랠리 종료 낙하 지점) ────────
         rally_drops = self._find_rally_drops(hit_events, x_arr, y_arr, fps)

@@ -130,7 +130,7 @@ class ImpactEvent:
     time_sec:   float
     score:      float
     owner:      str   # "top" | "bottom"
-    player:     str   # "pink_top" | "green_bottom"
+    player:     str   # "top" | "bottom"
     hit_number: int = 0
     # 감지 경로 (디버깅용, API 출력 제외)
     # "peaks"         : 물리 필터 통과 피크
@@ -1126,7 +1126,7 @@ class ImpactDetector:
             # 경계와 다를 수 있다. _owner_y는 pipeline_service가 코트 모서리
             # 좌표로부터 계산한 실제 코트 중점을 전달받아 더 정확하다.
             owner     = "top" if y[f] < self._owner_y else "bottom"
-            player    = "pink_top" if owner == "top" else "green_bottom"
+            player    = "top" if owner == "top" else "bottom"
             events.append(ImpactEvent(
                 frame    = frame_adj,
                 time_sec = frame_adj / self.fps,
@@ -1471,10 +1471,13 @@ class ImpactDetector:
         Returns:
             owner가 교정된 ImpactEvent 리스트.
         """
-        WRIST_KP          = [9, 10]    # COCO wrist
-        KP_CONF_THRESH    = 0.25       # 관절 신뢰도 최솟값
-        PROXIMITY_PX      = 150.0      # 손목-셔틀 최대 허용 거리
-        UPPER_BODY_IDX    = [0, 5, 6, 7, 8, 9, 10]   # 코·어깨·팔꿈치·손목 (상반신)
+        WRIST_KP          = [9, 10]           # COCO wrist
+        KP_CONF_THRESH    = 0.25              # 관절 신뢰도 최솟값
+        PROXIMITY_PX      = 150.0             # 손목-셔틀 최대 허용 거리
+        ANKLE_KP          = [15, 16]          # 발목 — 자기 코트를 벗어나지 않아 top/bottom 분류에 가장 안정적
+        KNEE_KP           = [13, 14]          # 무릎 — 발목 불가 시 차선
+        HIP_KP            = [11, 12]          # 힙 — 무릎 불가 시 차차선 (타격 자세에 따라 오판 가능)
+        UPPER_BODY_IDX    = [0, 5, 6, 7, 8, 9, 10]   # 코·어깨·팔꿈치·손목 (최후 fallback)
 
         # pose_data를 dict로 통일 (List이면 enumerate로 변환)
         if isinstance(pose_data, dict):
@@ -1485,10 +1488,6 @@ class ImpactDetector:
         result = list(candidates)
 
         for idx, event in enumerate(result):
-            # crossing 검증 타점은 교정하지 않음
-            if event.method == "peaks_crossed":
-                continue
-
             frame_no = event.frame
 
             # [v11] 정확한 frame에 pose가 없으면 ±2 이웃 프레임을 탐색한다.
@@ -1539,21 +1538,27 @@ class ImpactDetector:
                     if dist >= best_dist:
                         continue
 
-                    # 선수 중심 y 계산
-                    h1, h2 = kps[11], kps[12]
-                    if h1[2] >= KP_CONF_THRESH and h2[2] >= KP_CONF_THRESH:
-                        center_y = float((h1[1] + h2[1]) / 2.0)
-                    else:
-                        # 상반신 관절 중위값
-                        upper = [kps[i] for i in UPPER_BODY_IDX
-                                 if kps[i][2] >= KP_CONF_THRESH and kps[i][1] > 0]
-                        if not upper:
-                            # 전체 가시 관절 중위값
-                            upper = [k for k in kps
-                                     if k[2] >= KP_CONF_THRESH and k[1] > 0]
-                        if not upper:
-                            continue
-                        center_y = float(np.median([k[1] for k in upper]))
+                    # ── 선수 위치 y 계산 (top/bottom 분류용) ──────────────
+                    # 우선순위: 발목 → 무릎 → 힙 → 상반신 중위값
+                    # 발목을 우선하는 이유: 발은 항상 자기 코트에 있어 타격 자세(몸 기울임,
+                    # 점프, 스매시 등)에 영향받지 않고 안정적으로 top/bottom을 구분한다.
+                    # 힙을 우선하면 서브처럼 몸을 앞으로 기울일 때 반대 코트로 오판 발생.
+                    def _valid_pts(indices):
+                        return [kps[i] for i in indices
+                                if kps[i][2] >= KP_CONF_THRESH and kps[i][1] > 0]
+
+                    pts = _valid_pts(ANKLE_KP)
+                    if not pts:
+                        pts = _valid_pts(KNEE_KP)
+                    if not pts:
+                        pts = _valid_pts(HIP_KP)
+                    if not pts:
+                        pts = _valid_pts(UPPER_BODY_IDX)
+                    if not pts:
+                        pts = [k for k in kps if k[2] >= KP_CONF_THRESH and k[1] > 0]
+                    if not pts:
+                        continue
+                    center_y = float(np.median([k[1] for k in pts]))
 
                     best_dist     = dist
                     best_center_y = center_y
