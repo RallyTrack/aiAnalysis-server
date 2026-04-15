@@ -228,6 +228,93 @@ def is_inside_court(
     ) >= 0
 
 
+def _lerp_edge(p_start: np.ndarray, p_end: np.ndarray, y: float) -> float:
+    """두 점을 잇는 변 위에서 y 좌표에 대응하는 x 좌표를 선형 보간한다."""
+    dy = p_end[1] - p_start[1]
+    if abs(dy) < 1e-6:
+        return float((p_start[0] + p_end[0]) / 2)
+    t = (y - p_start[1]) / dy
+    return float(p_start[0] + t * (p_end[0] - p_start[0]))
+
+
+def classify_drop_location(
+    minimap_pts: np.ndarray,
+    net_y: float,
+    drop_pt: Tuple[float, float],
+) -> dict:
+    """
+    셔틀콕 낙하 지점이 코트 어느 영역에 떨어졌는지 판정하고,
+    최근접 코트 경계선까지의 실제 거리(cm)를 계산한다.
+
+    Args:
+        minimap_pts: 미니맵 단식 코트 꼭짓점 (4×2), [TL, TR, BR, BL] 순서.
+        net_y:       미니맵 네트 Y 픽셀 좌표.
+        drop_pt:     셔틀콕 낙하 미니맵 좌표 (mx, my).
+
+    Returns:
+        {
+          "location":     "in_top" | "in_bottom" | "out",
+          "margin_cm":    float,   # 최근접 라인 거리 (양수=안쪽, 음수=바깥)
+          "nearest_line": str,     # 가장 가까운 코트 라인 이름
+          "bwf_x":        float,   # BWF 실좌표 x (m)
+          "bwf_y":        float,   # BWF 실좌표 y (m)
+        }
+    """
+    pts = np.asarray(minimap_pts, dtype=np.float32).reshape(4, 2)
+    tl, tr, br, bl = pts[0], pts[1], pts[2], pts[3]
+
+    # ── 하프코트 폴리곤 생성 ─────────────────────────────────
+    net_left_x  = _lerp_edge(tl, bl, net_y)
+    net_right_x = _lerp_edge(tr, br, net_y)
+
+    net_l = np.array([net_left_x,  net_y], dtype=np.float32)
+    net_r = np.array([net_right_x, net_y], dtype=np.float32)
+
+    top_court    = np.array([tl, tr, net_r, net_l], dtype=np.float32)
+    bottom_court = np.array([net_l, net_r, br, bl], dtype=np.float32)
+
+    pt = (float(drop_pt[0]), float(drop_pt[1]))
+
+    if cv2.pointPolygonTest(top_court.astype(np.int32), pt, False) >= 0:
+        location = "in_top"
+    elif cv2.pointPolygonTest(bottom_court.astype(np.int32), pt, False) >= 0:
+        location = "in_bottom"
+    else:
+        location = "out"
+
+    # ── 미니맵 → BWF 실좌표(m) 역변환 ───────────────────────
+    bwf_corners = np.array([
+        [BWF_X["singles_left"],  BWF_Y["end_far"]],     # TL
+        [BWF_X["singles_right"], BWF_Y["end_far"]],     # TR
+        [BWF_X["singles_right"], BWF_Y["end_near"]],    # BR
+        [BWF_X["singles_left"],  BWF_Y["end_near"]],    # BL
+    ], dtype=np.float32)
+
+    minimap_to_bwf = cv2.getPerspectiveTransform(pts, bwf_corners)
+    pt_arr = np.array([[[drop_pt[0], drop_pt[1]]]], dtype=np.float32)
+    bwf_pt = cv2.perspectiveTransform(pt_arr, minimap_to_bwf)[0][0]
+    bx, by = float(bwf_pt[0]), float(bwf_pt[1])
+
+    # ── 각 경계선까지 수직 거리 (m) — 양수 = 코트 안쪽 ──────
+    line_distances = {
+        "좌측 사이드라인": bx - BWF_X["singles_left"],
+        "우측 사이드라인": BWF_X["singles_right"] - bx,
+        "엔드라인(far)":  BWF_Y["end_far"]  - by,
+        "엔드라인(near)": by - BWF_Y["end_near"],
+    }
+
+    nearest_line = min(line_distances, key=lambda k: abs(line_distances[k]))
+    margin_m     = line_distances[nearest_line]
+
+    return {
+        "location":     location,
+        "margin_cm":    round(margin_m * 100, 1),
+        "nearest_line": nearest_line,
+        "bwf_x":        round(bx, 3),
+        "bwf_y":        round(by, 3),
+    }
+
+
 # ────────────────────────────────────────────────────────────
 # 미니맵 코트 그리기 (BWF 표준 좌표계)
 # ────────────────────────────────────────────────────────────
