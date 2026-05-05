@@ -183,6 +183,27 @@ def compute_homographies(
 
 
 # ────────────────────────────────────────────────────────────
+# 네트 직선 계산
+# ────────────────────────────────────────────────────────────
+
+def compute_net_line(net_top_left, net_top_right) -> Tuple[float, float]:
+    """
+    네트 양 끝점으로부터 직선 방정식 y = ax + b 를 계산합니다.
+
+    Returns:
+        (a, b) — 기울기와 y 절편
+    """
+    x1, y1 = float(net_top_left.x), float(net_top_left.y)
+    x2, y2 = float(net_top_right.x), float(net_top_right.y)
+    dx = x2 - x1
+    if abs(dx) < 1e-6:
+        return 0.0, (y1 + y2) / 2
+    a = (y2 - y1) / dx
+    b = y1 - a * x1
+    return a, b
+
+
+# ────────────────────────────────────────────────────────────
 # 좌표 변환 헬퍼
 # ────────────────────────────────────────────────────────────
 

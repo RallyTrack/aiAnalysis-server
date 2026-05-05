@@ -171,8 +171,8 @@ class ImpactDetector:
     def __init__(
         self,
         fps:               float,
-        net_y_ratio:       float         = 0.46,
-        frame_height:      int           = 720,
+        net_y_ratio:       float           = 0.46,
+        frame_height:      int             = 720,
         owner_y_threshold: Optional[float] = None,
     ):
         """
@@ -257,25 +257,18 @@ class ImpactDetector:
         candidates = self._build_candidates(raw_frames, x, y, scores)
 
         # [v11] rescue_near_misses()에서 재사용할 수 있도록 마지막 계산 결과를 보관.
-        # detect() 호출 후 pipeline에서 get_near_miss_frames() → rescue_near_misses()
-        # 순서로 사용된다. 이 값들은 단일 detect() 주기 동안만 유효하다.
         self._last_scores   = scores
         self._last_adaptive = adaptive
 
         if verbose:
             print(f"  candidates before crossing: {[(c.frame, round(c.time_sec,2), c.owner, round(c.score,1)) for c in candidates]}")
 
-        # crossing owner 교정 (crossing 제공 시에만)
         if crossing_events:
             candidates = self._apply_crossing_owner(candidates, crossing_events)
 
-        # 포즈 기반 owner 교정 (pose_full 제공 시에만)
         if pose_full:
             candidates = self._apply_pose_owner(candidates, x, y, pose_full, verbose=verbose)
 
-        # [v11] run_alternation=False 시 pipeline_service에서 포즈 교정 후에 직접 실행.
-        # 이유: alternation이 포즈 데이터 없이 실행되면, 타격 누락 상황에서
-        #       올바른 owner를 가진 타점을 잘못 flip하고, 이후 포즈 교정이 못 고칠 수 있음.
         if run_alternation:
             candidates = self._correct_owner_alternation(candidates, y)
 
@@ -1121,10 +1114,6 @@ class ImpactDetector:
         events = []
         for f in frames:
             frame_adj = max(0, int(f) - 1)
-            # [v11] 초기 분류를 _owner_y(코트 세로 중점) 기준으로 변경.
-            # 기존 net_y는 네트 물리 위치로, 탑뷰/쿼터뷰에서 실제 선수 영역
-            # 경계와 다를 수 있다. _owner_y는 pipeline_service가 코트 모서리
-            # 좌표로부터 계산한 실제 코트 중점을 전달받아 더 정확하다.
             owner     = "top" if y[f] < self._owner_y else "bottom"
             player    = "top" if owner == "top" else "bottom"
             events.append(ImpactEvent(
@@ -1277,25 +1266,16 @@ class ImpactDetector:
             if prev.owner != curr.owner:
                 continue
 
-            # [v9] 두 타격 간 시간 간격이 충분히 길면 alternation 교정 생략.
-            # 동일 플레이어가 연속으로 두 번 치는 것이 물리적으로 허용되는 상황.
             time_gap = curr.time_sec - prev.time_sec
             if time_gap >= MIN_TIME_GAP_FOR_SKIP:
                 continue
 
-            # ── 우선순위 1: pose / crossing 검증 여부 ───────────
-            # [v11] pose 검증된 타점(method에 "_pose" 포함)은 flip 완전 금지.
-            # 이유: 실제 선수의 신체 좌표를 직접 확인한 결과이므로
-            #       교대 패턴 추론보다 신뢰도가 훨씬 높다.
-            # 둘 다 pose 검증이면: 타격 누락이 발생한 상황(A-B-A 패턴에서
-            # 가운데 B를 놓친 경우)일 수 있으므로 어느 쪽도 flip하지 않는다.
             prev_pose_conf = "_pose" in prev.method
             curr_pose_conf = "_pose" in curr.method
             prev_validated = (prev.method == "peaks_crossed") or prev_pose_conf
             curr_validated = (curr.method == "peaks_crossed") or curr_pose_conf
 
             if prev_pose_conf and curr_pose_conf:
-                # 둘 다 포즈 확정 → 타격 누락 상황으로 간주, flip 없이 유지
                 continue
             if prev_validated and not curr_validated:
                 corrected[i] = self._flip(curr)
@@ -1304,22 +1284,15 @@ class ImpactDetector:
                 corrected[i - 1] = self._flip(prev)
                 continue
 
-            # ── 우선순위 2: 점수 비율 가드 (v8 신규) ────────────
-            # 한쪽 점수가 SCORE_DOMINANCE배 이상이면 그 타점을 신뢰
-            # 낮은 점수 쪽이 노이즈·오탐지일 가능성이 높음
             score_ratio = curr.score / max(prev.score, 1e-6)
 
             if score_ratio >= SCORE_DOMINANCE:
-                # curr 점수가 현저히 높음 → prev 오탐지 가능성 → prev 플립
                 corrected[i - 1] = self._flip(prev)
                 continue
             if score_ratio <= 1.0 / SCORE_DOMINANCE:
-                # prev 점수가 현저히 높음 → curr 오탐지 가능성 → curr 플립
                 corrected[i] = self._flip(curr)
                 continue
 
-            # ── 우선순위 3: 위치 신뢰도 기반 (원본 로직) ────────
-            # 점수 차이가 미미할 때: 네트에서 더 멀리 있는 쪽이 owner 명확
             prev_conf = self._position_confidence(y[min(prev.frame, len(y) - 1)])
             curr_conf = self._position_confidence(y[min(curr.frame, len(y) - 1)])
 

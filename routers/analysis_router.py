@@ -9,11 +9,11 @@ RallyTrack AI 분석 라우터
   - run_analysis()에 좌표 데이터 전달
 """
 import os
-from typing import List, Optional
+from typing import Optional
 
 import httpx
 from fastapi import APIRouter, BackgroundTasks
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel
 
 from config.settings import BACKEND_URL
 from services.video_service import cleanup_video, download_video
@@ -32,60 +32,28 @@ def _get_pipeline() -> RallyTrackPipeline:
     return _pipeline
 
 
+class CourtCornerPoint(BaseModel):
+    x: int
+    y: int
+
+
+class CourtCorners(BaseModel):
+    topLeft: CourtCornerPoint
+    topRight: CourtCornerPoint
+    bottomLeft: CourtCornerPoint
+    bottomRight: CourtCornerPoint
+    netTopLeft: Optional[CourtCornerPoint] = None
+    netTopRight: Optional[CourtCornerPoint] = None
+
+
 class AnalyzeRequest(BaseModel):
     videoId: int
     s3Url: str
-
-    # skeleton
     skeletonUploadUrl: str = ""
     skeletonVideoUrl: str = ""
-
-    # minimap
     minimapUploadUrl: str = ""
     minimapVideoUrl: str = ""
-
-    # ── 사용자 지정 좌표 (프론트에서 캔버스 클릭으로 수집) ──────────────────
-    # 단식 코트 4개 꼭짓점: [[좌상x,y], [우상x,y], [우하x,y], [좌하x,y]]
-    # 값은 원본 영상 픽셀 좌표 기준
-    # None이면 COURT_CORNERS 비율 기반 자동 계산으로 폴백
-    singles_corners: Optional[List[List[float]]] = Field(
-        default=None,
-        description="단식 코트 4꼭짓점 픽셀 좌표 [[좌상],[우상],[우하],[좌하]]",
-        examples=[[[300,400],[980,400],[1100,990],[180,990]]],
-    )
-
-    # 네트 상단 좌우 끝 좌표: [[좌x,y], [우x,y]]
-    # None이면 net_judge를 건너뜀
-    net_coords: Optional[List[List[float]]] = Field(
-        default=None,
-        description="네트 상단 좌우 픽셀 좌표 [[좌],[우]]",
-        examples=[[[300,690],[980,690]]],
-    )
-
-    # ── Validators ─────────────────────────────────────────────────────────
-    @field_validator("singles_corners")
-    @classmethod
-    def validate_singles_corners(cls, v):
-        if v is None:
-            return v
-        if len(v) != 4:
-            raise ValueError("singles_corners는 정확히 4개의 점이어야 합니다.")
-        for pt in v:
-            if len(pt) != 2:
-                raise ValueError("각 점은 [x, y] 형식이어야 합니다.")
-        return v
-
-    @field_validator("net_coords")
-    @classmethod
-    def validate_net_coords(cls, v):
-        if v is None:
-            return v
-        if len(v) != 2:
-            raise ValueError("net_coords는 정확히 2개의 점(좌/우)이어야 합니다.")
-        for pt in v:
-            if len(pt) != 2:
-                raise ValueError("각 점은 [x, y] 형식이어야 합니다.")
-        return v
+    courtCorners: Optional[CourtCorners] = None
 
 
 @router.post("/analyze")
@@ -95,8 +63,9 @@ def analyze_video(request: AnalyzeRequest, background_tasks: BackgroundTasks):
     분석 작업을 백그라운드로 실행하고 즉시 응답을 반환한다.
     """
     print(f"[분석 요청 수신] videoId={request.videoId}")
-    print(f"  singles_corners 제공 여부: {request.singles_corners is not None}")
-    print(f"  net_coords 제공 여부:      {request.net_coords is not None}")
+    print(f"  courtCorners 제공 여부: {request.courtCorners is not None}")
+    if request.courtCorners is not None:
+        print(f"  netTopLeft 제공 여부:   {request.courtCorners.netTopLeft is not None}")
 
     background_tasks.add_task(
         run_analysis,
@@ -106,8 +75,7 @@ def analyze_video(request: AnalyzeRequest, background_tasks: BackgroundTasks):
         request.skeletonVideoUrl,
         request.minimapUploadUrl,
         request.minimapVideoUrl,
-        request.singles_corners,
-        request.net_coords,
+        request.courtCorners,
     )
     return {"message": "분석이 시작되었습니다.", "videoId": request.videoId}
 
@@ -152,21 +120,16 @@ def run_analysis(
     skeleton_video_url: str = "",
     minimap_upload_url: str = "",
     minimap_video_url: str = "",
-    singles_corners: Optional[List[List[float]]] = None,
-    net_coords: Optional[List[List[float]]] = None,
+    court_corners: Optional[CourtCorners] = None,
 ):
     """
     실제 분석 파이프라인.
 
     1. S3에서 영상 다운로드
-    2. RallyTrackPipeline 실행
-       → TrackNetV3 셔틀콕 트래킹
-       → YOLOv8-pose 관절 추출
-       → 물리 기반 타점 감지 (ImpactDetector)
-       → 네트 판정 (NetJudge, net_coords 제공 시)
-       → 영상 3종 렌더링 (main / minimap / skeleton)
-    3. skeleton + minimap 영상 S3 업로드
-    4. 백엔드 콜백
+    2. courtCorners → user_corners / net_coords 변환
+    3. RallyTrackPipeline 실행
+    4. skeleton + minimap 영상 S3 업로드
+    5. 백엔드 콜백
     """
     local_path = None
 
@@ -176,11 +139,28 @@ def run_analysis(
         # 1. S3에서 영상 다운로드
         local_path = download_video(s3_url)
 
-        # 2. RallyTrackPipeline 실행
+        # 2. courtCorners → pipeline 내부 형식으로 변환
+        # user_corners 순서: [TL, TR, BR, BL] (compute_homographies 기대 순서)
+        user_corners = None
+        net_coords   = None
+        if court_corners is not None:
+            user_corners = [
+                [court_corners.topLeft.x,     court_corners.topLeft.y],
+                [court_corners.topRight.x,    court_corners.topRight.y],
+                [court_corners.bottomRight.x, court_corners.bottomRight.y],
+                [court_corners.bottomLeft.x,  court_corners.bottomLeft.y],
+            ]
+            if court_corners.netTopLeft is not None and court_corners.netTopRight is not None:
+                net_coords = [
+                    [court_corners.netTopLeft.x,  court_corners.netTopLeft.y],
+                    [court_corners.netTopRight.x, court_corners.netTopRight.y],
+                ]
+
+        # 3. RallyTrackPipeline 실행
         pipeline = _get_pipeline()
         api_data = pipeline.run(
             local_path,
-            user_corners=singles_corners,
+            user_corners=user_corners,
             net_coords=net_coords,
         )
         result_paths = api_data.pop("result_paths", {})
