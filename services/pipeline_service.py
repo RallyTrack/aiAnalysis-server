@@ -359,6 +359,17 @@ class RallyTrackPipeline:
         else:
             print("[Step 4b] 네트 판정 생략 (net_coords 없음)")
 
+        if user_corners is not None:
+            corners_np = np.array(user_corners, dtype=np.float32)  # [TL, TR, BR, BL]
+            # 코트 상단/하단 라인의 y 중점 → 네트는 코트 세로 중앙에 위치
+            court_top_y = float((corners_np[0, 1] + corners_np[1, 1]) / 2.0)
+            court_bottom_y = float((corners_np[2, 1] + corners_np[3, 1]) / 2.0)
+            estimated_net_y = (court_top_y + court_bottom_y) / 2.0
+            net_y_ratio = estimated_net_y / max(frame_h, 1)
+            print(f"[Step 4b] net_y_ratio → user_corners 기반 추정값: {net_y_ratio:.3f}")
+        else:
+            print(f"[Step 4b] net_y_ratio → 디폴트 사용: {net_y_ratio:.3f}")
+
         # ── owner_y_threshold 계산 ────────────────────────────
         # [목적] top/bottom 선수 구분 기준 y값.
         # net_y(네트 상단 픽셀)는 코트 상단에 가까운 쿼터뷰에서
