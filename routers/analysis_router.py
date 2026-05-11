@@ -9,7 +9,7 @@ RallyTrack AI 분석 라우터
   - run_analysis()에 좌표 데이터 전달
 """
 import os
-from typing import Optional
+from typing import Literal, Optional
 
 import httpx
 from fastapi import APIRouter, BackgroundTasks
@@ -54,6 +54,7 @@ class AnalyzeRequest(BaseModel):
     minimapUploadUrl: str = ""
     minimapVideoUrl: str = ""
     courtCorners: Optional[CourtCorners] = None
+    mode: Literal["pro", "amateur"] = "amateur"
 
 
 @router.post("/analyze")
@@ -63,6 +64,7 @@ def analyze_video(request: AnalyzeRequest, background_tasks: BackgroundTasks):
     분석 작업을 백그라운드로 실행하고 즉시 응답을 반환한다.
     """
     print(f"[분석 요청 수신] videoId={request.videoId}")
+    print(f"  mode: {request.mode}")
     print(f"  courtCorners 제공 여부: {request.courtCorners is not None}")
     if request.courtCorners is not None:
         print(f"  netTopLeft 제공 여부:   {request.courtCorners.netTopLeft is not None}")
@@ -76,6 +78,7 @@ def analyze_video(request: AnalyzeRequest, background_tasks: BackgroundTasks):
         request.minimapUploadUrl,
         request.minimapVideoUrl,
         request.courtCorners,
+        request.mode,
     )
     return {"message": "분석이 시작되었습니다.", "videoId": request.videoId}
 
@@ -121,6 +124,7 @@ def run_analysis(
     minimap_upload_url: str = "",
     minimap_video_url: str = "",
     court_corners: Optional[CourtCorners] = None,
+    mode: Literal["pro", "amateur"] = "amateur",
 ):
     """
     실제 분석 파이프라인.
@@ -162,6 +166,7 @@ def run_analysis(
             local_path,
             user_corners=user_corners,
             net_coords=net_coords,
+            mode=mode,
         )
         result_paths = api_data.pop("result_paths", {})
 

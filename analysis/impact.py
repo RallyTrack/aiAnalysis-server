@@ -174,6 +174,7 @@ class ImpactDetector:
         net_y_ratio:       float           = 0.46,
         frame_height:      int             = 720,
         owner_y_threshold: Optional[float] = None,
+        pose_conf_threshold: float          = 0.25,
     ):
         """
         Args:
@@ -185,6 +186,7 @@ class ImpactDetector:
                                 None 이면 frame_height × net_y_ratio (기존 동작).
                                 quarter-view 카메라에서는 코트 세로 중점(court_mid_y)을
                                 pipeline_service 가 계산해 전달해야 정확한 선수 분류가 됨.
+            pose_conf_threshold : owner 판정에 사용할 관절 confidence 임계값.
         """
         self.fps          = fps
         self.net_y        = frame_height * net_y_ratio   # NetJudge 호환용, crossing 판정
@@ -193,6 +195,7 @@ class ImpactDetector:
         # 선수 소유권 결정 임계값 — net_y 와 분리
         self._owner_y     = owner_y_threshold if owner_y_threshold is not None else self.net_y
         self._ambiguity_band = frame_height * 0.12
+        self._pose_conf_threshold = pose_conf_threshold
 
     # ── 공개 메서드 ──────────────────────────────────────────
 
@@ -1445,7 +1448,7 @@ class ImpactDetector:
             owner가 교정된 ImpactEvent 리스트.
         """
         WRIST_KP          = [9, 10]           # COCO wrist
-        KP_CONF_THRESH    = 0.25              # 관절 신뢰도 최솟값
+        KP_CONF_THRESH    = self._pose_conf_threshold
         PROXIMITY_PX      = 150.0             # 손목-셔틀 최대 허용 거리
         ANKLE_KP          = [15, 16]          # 발목 — 자기 코트를 벗어나지 않아 top/bottom 분류에 가장 안정적
         KNEE_KP           = [13, 14]          # 무릎 — 발목 불가 시 차선
@@ -1698,7 +1701,7 @@ class ImpactDetector:
             rescued 타점이 추가된 ImpactEvent 리스트 (hit_number 재발급 완료).
         """
         WRIST_KP       = [9, 10]
-        KP_CONF_THRESH = 0.25
+        KP_CONF_THRESH = self._pose_conf_threshold
         UPPER_BODY_IDX = [0, 5, 6, 7, 8, 9, 10]
         CONTEXT_RADIUS = 2
 

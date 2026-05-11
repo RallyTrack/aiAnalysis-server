@@ -41,11 +41,32 @@ from analysis.net_judge     import NetCrossingEvent, NetFaultEvent, NetJudge
 from analysis.skeleton_view import SkeletonCourtRenderer
 
 
+ANALYSIS_MODE_PROFILES = {
+    "pro": {
+        "tracknet_batch_size": 4,
+        "pose_conf_threshold": 0.3,
+        "pose_model_conf": 0.3,
+        "run_near_miss_rescue": False,
+    },
+    "amateur": {
+        "tracknet_batch_size": 1,
+        "pose_conf_threshold": 0.2,
+        "pose_model_conf": 0.2,
+        "run_near_miss_rescue": True,
+    },
+}
+
+
+def _mode_profile(mode: str) -> tuple[str, dict]:
+    normalized = mode if mode in ANALYSIS_MODE_PROFILES else "amateur"
+    return normalized, ANALYSIS_MODE_PROFILES[normalized]
+
+
 # ────────────────────────────────────────────────────────────
 # TrackNet subprocess 실행
 # ────────────────────────────────────────────────────────────
 
-def run_tracknet(video_path: str) -> str:
+def run_tracknet(video_path: str, batch_size: int | None = None) -> str:
     """TrackNetV3 predict.py 실행 → CSV 경로 반환. 이미 있으면 재사용."""
     video_name = Path(video_path).stem
     csv_path   = os.path.join(PATHS["prediction_dir"], f"{video_name}_ball.csv")
@@ -61,15 +82,17 @@ def run_tracknet(video_path: str) -> str:
     # Windows 절대 경로(\)를 그대로 넘기면 split('/')가 전체 경로를 video_name으로 잘못 추출.
     # → forward slash로 변환해서 넘겨야 prediction/ 폴더에 올바르게 저장됨.
     video_path_fwd = video_path.replace("\\", "/")
+    resolved_batch_size = batch_size or TRACKNET_CONFIG["batch_size"]
+
     cmd = [
         sys.executable, predict_script,
         "--video_file",      video_path_fwd,
         "--tracknet_file",   PATHS["tracknet_ckpt"],
         "--inpaintnet_file", PATHS["inpaintnet_ckpt"],
-        "--batch_size",      str(TRACKNET_CONFIG["batch_size"]),
+        "--batch_size",      str(resolved_batch_size),
         "--save_dir",        PATHS["prediction_dir"],
     ]
-    print("[TrackNet] 분석 시작...")
+    print(f"[TrackNet] 분석 시작... batch_size={resolved_batch_size}")
     result = subprocess.run(cmd, cwd=PATHS["tracknet_dir"])
     if result.returncode != 0:
         raise RuntimeError("TrackNet 실행 실패")
@@ -276,6 +299,7 @@ class RallyTrackPipeline:
         video_path:   str,
         user_corners: Optional[List[List[float]]] = None,
         net_coords:   Optional[List[List[float]]] = None,
+        mode:         str = "amateur",
         verbose:      bool = False,
     ) -> dict:
         """
@@ -287,14 +311,17 @@ class RallyTrackPipeline:
                            None이면 config.py COURT_CORNERS 비율 기반 자동 계산
             net_coords   : 네트 상단 2점 [[좌],[우]]
                            None이면 네트 판정 생략
+            mode         : "pro" | "amateur" 분석 프로파일
 
         Returns:
             api_data dict (result_paths 포함)
         """
         video_path = os.path.abspath(video_path)
         video_name = Path(video_path).stem
+        mode, profile = _mode_profile(mode)
         os.makedirs(PATHS["result_dir"],     exist_ok=True)
         os.makedirs(PATHS["prediction_dir"], exist_ok=True)
+        print(f"[Mode] analysis mode={mode}")
 
         # ── Step 1: TrackNet ──────────────────────────────────
         if self.skip_tracknet:
@@ -302,7 +329,10 @@ class RallyTrackPipeline:
             print(f"[Step 1] TrackNet 생략 → {csv_path}")
         else:
             print("[Step 1] TrackNetV3 실행")
-            csv_path = run_tracknet(video_path)
+            csv_path = run_tracknet(
+                video_path,
+                batch_size=profile["tracknet_batch_size"],
+            )
 
         x_arr, y_arr = load_trajectory_csv(csv_path)
 
@@ -359,7 +389,7 @@ class RallyTrackPipeline:
         else:
             print("[Step 4b] 네트 판정 생략 (net_coords 없음)")
 
-        if user_corners is not None:
+        if net_coords is None and user_corners is not None:
             corners_np = np.array(user_corners, dtype=np.float32)  # [TL, TR, BR, BL]
             # 코트 상단/하단 라인의 y 중점 → 네트는 코트 세로 중앙에 위치
             court_top_y = float((corners_np[0, 1] + corners_np[1, 1]) / 2.0)
@@ -367,7 +397,7 @@ class RallyTrackPipeline:
             estimated_net_y = (court_top_y + court_bottom_y) / 2.0
             net_y_ratio = estimated_net_y / max(frame_h, 1)
             print(f"[Step 4b] net_y_ratio → user_corners 기반 추정값: {net_y_ratio:.3f}")
-        else:
+        elif net_coords is None:
             print(f"[Step 4b] net_y_ratio → 디폴트 사용: {net_y_ratio:.3f}")
 
         # ── owner_y_threshold 계산 ────────────────────────────
@@ -399,6 +429,7 @@ class RallyTrackPipeline:
             net_y_ratio       = net_y_ratio,
             frame_height      = frame_h,
             owner_y_threshold = owner_y_threshold,
+            pose_conf_threshold = profile["pose_conf_threshold"],
         )
         hit_events = detector.detect(
             x_arr, y_arr,
@@ -419,7 +450,9 @@ class RallyTrackPipeline:
 
             # (A) 확정 타점 owner 교정
             pose_at_hits = self._collect_pose_at_frames(
-                video_path, [e.frame for e in hit_events]
+                video_path,
+                [e.frame for e in hit_events],
+                pose_model_conf=profile["pose_model_conf"],
             )
             if pose_at_hits:
                 hit_events = detector.apply_pose_owner(
@@ -428,22 +461,28 @@ class RallyTrackPipeline:
                 print(f"           → owner 교정 완료 ({len(pose_at_hits)}프레임)")
 
             # (B) near-miss 복구 (IQR 억제된 서브 리턴 포함)
-            near_miss_frames = detector.get_near_miss_frames(hit_events)
-            if near_miss_frames:
-                pose_at_near_miss = self._collect_pose_at_frames(
-                    video_path, near_miss_frames, context_radius=2
-                )
-                if pose_at_near_miss:
-                    before = len(hit_events)
-                    hit_events = detector.rescue_near_misses(
-                        hit_events, x_arr, y_arr,
-                        pose_at_near_miss,
-                        verbose=verbose,
+            if profile["run_near_miss_rescue"]:
+                near_miss_frames = detector.get_near_miss_frames(hit_events)
+                if near_miss_frames:
+                    pose_at_near_miss = self._collect_pose_at_frames(
+                        video_path,
+                        near_miss_frames,
+                        context_radius=2,
+                        pose_model_conf=profile["pose_model_conf"],
                     )
-                    rescued = len(hit_events) - before
-                    if rescued > 0:
-                        print(f"           → near-miss 복구: +{rescued}개 "
-                              f"(총 {len(hit_events)}개)")
+                    if pose_at_near_miss:
+                        before = len(hit_events)
+                        hit_events = detector.rescue_near_misses(
+                            hit_events, x_arr, y_arr,
+                            pose_at_near_miss,
+                            verbose=verbose,
+                        )
+                        rescued = len(hit_events) - before
+                        if rescued > 0:
+                            print(f"           → near-miss 복구: +{rescued}개 "
+                                  f"(총 {len(hit_events)}개)")
+            else:
+                print("           → near-miss 복구 생략 (pro mode)")
 
         # ── Step 4.6: 단순 교대 owner 재할당 ────────────────────
         # 첫 타점 owner: Step 4.5 포즈 교정 결과(손목-셔틀 거리) 신뢰
@@ -674,6 +713,7 @@ class RallyTrackPipeline:
         video_path: str,
         frames: List[int],
         context_radius: int = 2,
+        pose_model_conf: float | None = None,
     ) -> dict:
         """
         지정된 프레임들에 대해 YOLO pose predict를 실행하고
@@ -688,6 +728,7 @@ class RallyTrackPipeline:
             frames          : 포즈 수집 대상 frame 인덱스 리스트.
             context_radius  : 각 frame 앞뒤로 추가 수집할 프레임 수.
                               타점 frame 자체에 셔틀이 없어도 인근 프레임으로 보완.
+            pose_model_conf : YOLO pose detection confidence.
 
         Returns:
             {frame_idx: List[dict]} — keypoints 있는 프레임만 포함.
@@ -714,7 +755,9 @@ class RallyTrackPipeline:
                 continue
             # predict (no tracking) — 빠르고 track 상태 오염 없음
             pose_res = self.pose_model.predict(
-                frame, verbose=False, conf=POSE_CONFIG["confidence"]
+                frame,
+                verbose=False,
+                conf=pose_model_conf or POSE_CONFIG["confidence"],
             )[0]
             kp_list = extract_keypoints(pose_res)
             if kp_list:
