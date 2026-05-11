@@ -135,15 +135,21 @@ class ImpactEvent:
     # 감지 경로 (디버깅용, API 출력 제외)
     # "peaks"         : 물리 필터 통과 피크
     # "peaks_crossed" : 물리 필터 + crossing으로 owner 검증
-    method: str = "peaks"
+    method:            str            = "peaks"
+    stroke_type:       Optional[str]  = None
+    stroke_confidence: Optional[float] = None
 
     def to_dict(self) -> dict:
-        return {
+        d: dict = {
             "hit_number": self.hit_number,
             "frame":      self.frame,
             "time_sec":   round(self.time_sec, 3),
             "player":     self.player,
         }
+        if self.stroke_type is not None:
+            d["stroke_type"]       = self.stroke_type
+            d["stroke_confidence"] = round(self.stroke_confidence, 3)
+        return d
 
 
 # ────────────────────────────────────────────────────────────

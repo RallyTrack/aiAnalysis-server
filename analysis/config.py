@@ -19,6 +19,7 @@ PATHS = {
     "tracknet_ckpt":   os.path.join(BASE_DIR, "tracknetv3", "ckpts", "TrackNet_best.pt"),
     "inpaintnet_ckpt": os.path.join(BASE_DIR, "tracknetv3", "ckpts", "InpaintNet_best.pt"),
     "yolo_model":      os.path.join(BASE_DIR, "weights", "yolov8n-pose.pt"),
+    "stroke_weights_dir": os.path.join(BASE_DIR, "weights", "stroke"),
 }
 
 # ─────────────────────────────────────────────

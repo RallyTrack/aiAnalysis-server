@@ -41,6 +41,22 @@ from analysis.net_judge     import NetCrossingEvent, NetFaultEvent, NetJudge
 from analysis.skeleton_view import SkeletonCourtRenderer
 
 
+_stroke_classifier = None
+_stroke_classifier_loaded = False
+
+
+def _get_stroke_classifier():
+    global _stroke_classifier, _stroke_classifier_loaded
+    if not _stroke_classifier_loaded:
+        _stroke_classifier_loaded = True
+        try:
+            from analysis.stroke_classifier import StrokeClassifierEnsemble
+            _stroke_classifier = StrokeClassifierEnsemble()
+        except Exception as e:
+            print(f"[StrokeClassifier] 초기화 실패 (스트로크 분류 생략): {e}")
+    return _stroke_classifier
+
+
 ANALYSIS_MODE_PROFILES = {
     "pro": {
         "tracknet_batch_size": 4,
@@ -494,6 +510,24 @@ class RallyTrackPipeline:
         hit_events = _reassign_owners_alternating(hit_events, y_arr, fps, _owner_y_ref)
         print(f"[Step 4.6] 교대 owner 재할당 완료 → {len(hit_events)}개")
 
+        # ── Step 4.8: 스트로크 분류 ──────────────────────────────
+        print("[Step 4.8] 스트로크 분류")
+        clf = _get_stroke_classifier()
+        if clf is not None and hit_events:
+            classified = 0
+            for ev in hit_events:
+                try:
+                    result = clf.classify_at(video_path, ev.frame)
+                    ev.stroke_type       = result.class_name
+                    ev.stroke_confidence = result.confidence
+                    classified += 1
+                    print(f"           #{ev.hit_number:02d} → {result.class_name} ({result.confidence:.2f})")
+                except Exception as exc:
+                    print(f"           #{ev.hit_number:02d} 분류 실패: {exc}")
+            print(f"           → {classified}/{len(hit_events)}개 분류 완료")
+        else:
+            print("           → 스트로크 분류기 없음 (weights/stroke/ 확인 필요)")
+
         # ── Step 4.7: In/Out 판정 (랠리 종료 낙하 지점) ────────
         rally_drops = self._find_rally_drops(hit_events, x_arr, y_arr, fps)
         drop_results = []   # 판정 결과 (JSON 출력용)
@@ -557,9 +591,15 @@ class RallyTrackPipeline:
         else:
             print("[Step 4.7] In/Out 판정 — 낙하 감지 없음")
 
-        # 렌더링에서 빠른 조회를 위한 세트
-        hit_frames   = {e.frame for e in hit_events}
-        fault_frames = {e.frame for e in net_fault_events}
+        # 렌더링에서 빠른 조회를 위한 세트/딕셔너리
+        hit_frames    = {e.frame for e in hit_events}
+        fault_frames  = {e.frame for e in net_fault_events}
+        # frame → stroke_type 빠른 조회 (타점 ±2 프레임에 오버레이)
+        stroke_by_frame: dict[int, str] = {}
+        for ev in hit_events:
+            if ev.stroke_type:
+                for delta in range(-2, 3):
+                    stroke_by_frame[ev.frame + delta] = ev.stroke_type
 
         # ── Step 5: 렌더러 초기화 ────────────────────────────
         minimap_renderer  = MinimapRenderer(hg, hit_events)
@@ -622,6 +662,15 @@ class RallyTrackPipeline:
                 annotated[:, :, 0] = np.clip(
                     annotated[:, :, 0].astype(np.int16) + 60, 0, 255
                 ).astype(np.uint8)
+
+            # 스트로크 분류 표시
+            if frame_idx in stroke_by_frame:
+                cv2.putText(
+                    annotated, stroke_by_frame[frame_idx],
+                    (frame_w // 2 - 90, 185),
+                    cv2.FONT_HERSHEY_DUPLEX, 1.6,
+                    (0, 255, 180), 4, cv2.LINE_AA,
+                )
 
             # 네트 걸림 표시
             if any(abs(frame_idx - ff) <= 3 for ff in fault_frames):
