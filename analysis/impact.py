@@ -138,6 +138,10 @@ class ImpactEvent:
     method:            str            = "peaks"
     stroke_type:       Optional[str]  = None
     stroke_confidence: Optional[float] = None
+    # 타격 시점 선수 중심 좌표 (프레임 크기 대비 0.0~1.0 정규화)
+    # pipeline_service.py에서 포즈 추출 후 주입됨. 없으면 None.
+    player_x: Optional[float] = None   # 좌→우
+    player_y: Optional[float] = None   # 상→하
 
     def to_dict(self) -> dict:
         d: dict = {
@@ -149,6 +153,11 @@ class ImpactEvent:
         if self.stroke_type is not None:
             d["stroke_type"]       = self.stroke_type
             d["stroke_confidence"] = round(self.stroke_confidence, 3)
+        # 선수 위치 — 포즈 데이터가 주입된 경우에만 포함 (기존 API 하위 호환)
+        if self.player_x is not None:
+            d["player_x"] = round(self.player_x, 4)
+        if self.player_y is not None:
+            d["player_y"] = round(self.player_y, 4)
         return d
 
 

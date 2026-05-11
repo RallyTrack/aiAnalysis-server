@@ -271,6 +271,80 @@ def _reassign_owners_alternating(
 
 
 # ────────────────────────────────────────────────────────────
+# 선수 중심 좌표 추출 헬퍼
+# ────────────────────────────────────────────────────────────
+
+def _extract_player_center(
+    pose_data: dict,
+    target_frame: int,
+    owner: str,
+    owner_y_threshold: float,
+    frame_w: int,
+    frame_h: int,
+    context_radius: int = 2,
+) -> "tuple[float, float] | None":
+    """
+    타격 프레임 근방의 포즈 데이터에서 해당 선수(owner)의 신체 중심 좌표를 추출한다.
+
+    Args:
+        pose_data         : {frame_idx: List[dict]} — _collect_pose_at_frames() 반환값
+        target_frame      : 타격 프레임 인덱스
+        owner             : "top" | "bottom"
+        owner_y_threshold : top/bottom 구분 기준 y (픽셀)
+        frame_w, frame_h  : 영상 해상도 (정규화 기준)
+        context_radius    : 탐색 범위 (target_frame ± context_radius)
+
+    Returns:
+        (x_norm, y_norm) 0~1 정규화 좌표, 또는 None (포즈 미감지 시)
+    """
+    KP_HIP      = [11, 12]
+    KP_KNEE     = [13, 14]
+    KP_SHOULDER = [5, 6]
+    KP_CONF     = 0.25
+
+    def _valid_pts(kps, indices):
+        return [kps[i] for i in indices
+                if len(kps) > i and kps[i][2] >= KP_CONF and kps[i][1] > 0]
+
+    for delta in range(-context_radius, context_radius + 1):
+        probe = target_frame + delta
+        players = pose_data.get(probe, [])
+        if not players:
+            continue
+
+        for player in players:
+            kps = player.get("keypoints", [])
+            if len(kps) < 13:
+                continue
+
+            # 힙 → 무릎 → 어깨 순서로 fallback하며 중심 좌표 계산
+            pts = _valid_pts(kps, KP_HIP)
+            if not pts:
+                pts = _valid_pts(kps, KP_KNEE)
+            if not pts:
+                pts = _valid_pts(kps, KP_SHOULDER)
+            if not pts:
+                pts = [k for k in kps if k[2] >= KP_CONF and k[1] > 0]
+            if not pts:
+                continue
+
+            center_y = float(np.median([k[1] for k in pts]))
+            center_x = float(np.median([k[0] for k in pts]))
+
+            # owner 판별: y 기준으로 top/bottom 확인
+            pose_owner = "top" if center_y < owner_y_threshold else "bottom"
+            if pose_owner != owner:
+                continue
+
+            # 0~1 정규화 후 반환
+            x_norm = max(0.0, min(1.0, center_x / max(frame_w, 1)))
+            y_norm = max(0.0, min(1.0, center_y / max(frame_h, 1)))
+            return x_norm, y_norm
+
+    return None  # 해당 owner 포즈 미감지
+
+
+# ────────────────────────────────────────────────────────────
 # 메인 파이프라인 클래스
 # ────────────────────────────────────────────────────────────
 
@@ -475,6 +549,26 @@ class RallyTrackPipeline:
                     hit_events, x_arr, y_arr, pose_at_hits, verbose=verbose
                 )
                 print(f"           → owner 교정 완료 ({len(pose_at_hits)}프레임)")
+
+                # ── 선수 위치 주입 (이미 수집된 pose_at_hits 재사용, 추가 YOLO 없음) ──
+                _owner_y = (
+                    owner_y_threshold if owner_y_threshold is not None
+                    else frame_h * net_y_ratio
+                )
+                injected = 0
+                for ev in hit_events:
+                    result = _extract_player_center(
+                        pose_data         = pose_at_hits,
+                        target_frame      = ev.frame,
+                        owner             = ev.owner,
+                        owner_y_threshold = _owner_y,
+                        frame_w           = frame_w,
+                        frame_h           = frame_h,
+                    )
+                    if result is not None:
+                        ev.player_x, ev.player_y = result
+                        injected += 1
+                print(f"           → 선수 위치 주입: {injected}/{len(hit_events)}개")
 
             # (B) near-miss 복구 (IQR 억제된 서브 리턴 포함)
             if profile["run_near_miss_rescue"]:
