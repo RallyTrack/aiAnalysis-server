@@ -26,6 +26,7 @@ dist/
 
 # 모델 가중치 (Git LFS 또는 S3에서 관리)
 weights/*.pth
+weights/stroke/
 
 # 임시 영상 파일
 temp_videos/
