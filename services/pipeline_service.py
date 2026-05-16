@@ -433,52 +433,12 @@ def validate_drop(
 def classify_rally_result(
     last_hit_owner: str,
     valid_drops: list,
-    net_fault_events: list,
     rally_idx: int,
 ) -> dict:
-    """
-    Classify the outcome of a single rally for ability-metric consumption.
-
-    Priority order:
-        1. Net fault attributed to last_hit_owner        → CONFIRMED_ERROR
-        2. Validated drop, last hitter's shot landed IN  → WINNER
-        3. Validated drop, last hitter's shot landed OUT → CONFIRMED_ERROR
-        4. No reliable data                              → UNKNOWN  (no penalty)
-
-    Net-crossing direction is intentionally excluded: 2-D overhead video cannot
-    reliably determine whether the shuttle cleared the net in 3-D space.
-
-    Args:
-        last_hit_owner  : "top" | "bottom"
-        valid_drops     : list of validated drop dicts (post-filter)
-        net_fault_events: list of NetFaultEvent objects from NetJudge
-        rally_idx       : 1-based rally index for matching drop entries
-
-    Returns:
-        dict with keys:
-            lastHitOwner (str), resultType (str), isIn (bool|None), location (str|None)
-    """
-    # Priority 1: net fault by last hitter
-    # NetFaultEvent has .time_sec; we match by rally_idx approximation via drop timing.
-    # Since net faults are attached to the rally via hitter_side on NetCrossingEvent,
-    # we check if any net fault's hitter side matches last_hit_owner.
-    # (Simplified: if a net fault exists and is attributed to this player this rally.)
-    for fault in net_fault_events:
-        # NetFaultEvent does not carry owner; use the crossing direction from the
-        # corresponding NetCrossingEvent stored upstream. If unavailable, skip.
-        owner = getattr(fault, "owner", None)
-        if owner == last_hit_owner:
-            return {
-                "lastHitOwner": last_hit_owner,
-                "resultType":   "CONFIRMED_ERROR",
-                "isIn":         False,
-                "location":     "out",
-            }
-
-    # Priority 2 & 3: validated in/out data
+    # Priority 1: validated in/out landing data
     matching = [d for d in valid_drops if d.get("rally_idx") == rally_idx]
     if matching:
-        drop = matching[0]
+        drop     = matching[0]
         is_in    = drop.get("is_in", False)
         location = drop.get("result", {}).get("location", "out")
         return {
@@ -488,7 +448,7 @@ def classify_rally_result(
             "location":     location,
         }
 
-    # Priority 4: no reliable data
+    # Priority 2: no reliable data → neutral, no penalty
     return {
         "lastHitOwner": last_hit_owner,
         "resultType":   "UNKNOWN",
@@ -861,10 +821,9 @@ class RallyTrackPipeline:
                     is_last = True
             if is_last:
                 result = classify_rally_result(
-                    last_hit_owner   = ev.owner,
-                    valid_drops      = drop_results,
-                    net_fault_events = net_fault_events,
-                    rally_idx        = rally_idx,
+                    last_hit_owner = ev.owner,
+                    valid_drops    = drop_results,
+                    rally_idx      = rally_idx,
                 )
                 rally_results.append({
                     "rallyIdx":      rally_idx,
