@@ -263,12 +263,12 @@ def compute_home_zone_minimap(
     x_lo_m = BWF_X["center"] - 1.3   # 1.75m
     x_hi_m = BWF_X["center"] + 1.3   # 4.35m
 
-    if side == "bottom":
-        # 숏 서비스 라인(8.68m) 기준 ±1.0m
+    if side == "top":
+        # 미니맵 상단 = far end (카메라 반대쪽) → short_service_far 기준
         y_lo_m = BWF_Y["short_service_far"] - 1.0   # 7.68m
         y_hi_m = BWF_Y["short_service_far"] + 1.0   # 9.68m
     else:
-        # 숏 서비스 라인(4.72m) 기준 ±1.0m
+        # 미니맵 하단 = near end (카메라 쪽) → short_service_near 기준
         y_lo_m = BWF_Y["short_service_near"] - 1.0  # 3.72m
         y_hi_m = BWF_Y["short_service_near"] + 1.0  # 5.72m
 
