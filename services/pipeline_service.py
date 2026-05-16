@@ -18,6 +18,7 @@ RallyTrack - 메인 분석 파이프라인 서비스
 
 from __future__ import annotations
 
+import bisect
 import json
 import math
 import os
@@ -930,7 +931,7 @@ class RallyTrackPipeline:
 
             # ── 영상 2: 2D Top-Down 미니맵 ───────────────────
             minimap_canvas = minimap_renderer.render_frame(
-                frame_idx, sx, sy, keypoints_list
+                frame_idx, keypoints_list
             )
             out_2.write(minimap_canvas)
 
@@ -967,10 +968,21 @@ class RallyTrackPipeline:
 
         player_metrics: dict = {}
 
+        def _get_path_segment(
+            path: list,
+            frame_keys: list,
+            frame_a: int,
+            frame_b: int,
+        ) -> list:
+            """full_path[(frame_idx, mx, my)] 에서 [frame_a, frame_b] 구간의 (mx, my) 반환."""
+            i = bisect.bisect_left(frame_keys, frame_a)
+            j = bisect.bisect_right(frame_keys, frame_b)
+            return [(p[1], p[2]) for p in path[i:j]]
+
         for side in ("top", "bottom"):
             full_path  = minimap_renderer._player.get_full_path(side)
             zone_min, zone_max = compute_home_zone_minimap(
-                hg["minimap_pts"], hg["net_y_minimap"], side, _mw, _mh, _pad
+                side, _mw, _mh, _pad
             )
 
             side_hits = [ev for ev in hit_events if ev.owner == side]
@@ -979,22 +991,16 @@ class RallyTrackPipeline:
                 player_metrics[side] = {"homeReturnRate": None}
                 continue
 
-            total_frames = hit_events[-1].frame if hit_events else 1
-
-            def frame_to_path_idx(frame: int) -> int:
-                ratio = frame / max(total_frames, 1)
-                return int(ratio * len(full_path))
+            frame_keys = [p[0] for p in full_path]
 
             return_count = 0
             pair_count   = 0
 
             for k in range(len(side_hits) - 1):
-                hit_a = side_hits[k]
-                hit_b = side_hits[k + 1]
-
-                idx_a = frame_to_path_idx(hit_a.frame)
-                idx_b = frame_to_path_idx(hit_b.frame)
-                segment = full_path[idx_a:idx_b]
+                segment = _get_path_segment(
+                    full_path, frame_keys,
+                    side_hits[k].frame, side_hits[k + 1].frame,
+                )
 
                 if not segment:
                     continue
