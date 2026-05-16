@@ -19,6 +19,7 @@ RallyTrack - 메인 분석 파이프라인 서비스
 from __future__ import annotations
 
 import json
+import math
 import os
 import subprocess
 import sys
@@ -345,6 +346,158 @@ def _extract_player_center(
 
 
 # ────────────────────────────────────────────────────────────
+# In/Out 오판정 검증 헬퍼
+# ────────────────────────────────────────────────────────────
+
+def validate_drop(
+    drop: dict,
+    hit_events: list,
+    x_arr: np.ndarray,
+    y_arr: np.ndarray,
+    fps: float,
+    hit_check_sec: float = 2.0,
+    shuttle_check_sec: float = 1.0,
+    shuttle_skip_sec: float = 0.1,
+    max_bounce_disp_px: float = 60.0,
+    max_bounce_speed_px: float = 8.0,
+) -> bool:
+    """
+    Determine whether a detected shuttle drop is a genuine landing or a false positive.
+
+    Two-stage validation:
+
+    Stage 1 — Hit-event continuity check (high confidence when hit detection is working)
+        If any ImpactEvent occurs within `hit_check_sec` after the drop frame,
+        the rally is ongoing → drop is a false positive.
+
+    Stage 2 — Shuttle kinematic check (covers gaps in hit detection)
+        After skipping `shuttle_skip_sec` from drop frame (to avoid bounce noise),
+        examine shuttle position data for `shuttle_check_sec`.
+        A genuine landing shows:
+            - maximum displacement from drop point < max_bounce_disp_px
+            - mean inter-frame speed < max_bounce_speed_px
+        Exceeding either threshold indicates the shuttle is still in play.
+
+    Returns:
+        True  → valid landing, include in rally results
+        False → false positive, discard
+    """
+    drop_frame = drop["frame"]
+    drop_x     = float(drop["sx"])
+    drop_y     = float(drop["sy"])
+
+    # ── Stage 1: hit-event continuity ────────────────────────
+    hits_after = [
+        ev for ev in hit_events
+        if ev.frame > drop_frame
+        and (ev.frame - drop_frame) / max(fps, 1.0) <= hit_check_sec
+    ]
+    if hits_after:
+        return False
+
+    # ── Stage 2: shuttle kinematics ──────────────────────────
+    skip_frames  = max(1, int(fps * shuttle_skip_sec))
+    check_frames = max(1, int(fps * shuttle_check_sec))
+    start_f = drop_frame + skip_frames
+    end_f   = min(drop_frame + skip_frames + check_frames, len(x_arr))
+
+    valid_pos = [
+        (float(x_arr[f]), float(y_arr[f]))
+        for f in range(start_f, end_f)
+        if x_arr[f] > 0 and y_arr[f] > 0
+    ]
+
+    if len(valid_pos) < 3:
+        # Insufficient data after drop → assume genuine landing
+        return True
+
+    max_disp = max(
+        math.sqrt((px - drop_x) ** 2 + (py - drop_y) ** 2)
+        for px, py in valid_pos
+    )
+    speeds = [
+        math.sqrt(
+            (valid_pos[i][0] - valid_pos[i - 1][0]) ** 2 +
+            (valid_pos[i][1] - valid_pos[i - 1][1]) ** 2
+        )
+        for i in range(1, len(valid_pos))
+    ]
+    avg_speed = sum(speeds) / len(speeds) if speeds else 0.0
+
+    if max_disp > max_bounce_disp_px or avg_speed > max_bounce_speed_px:
+        return False
+
+    return True
+
+
+def classify_rally_result(
+    last_hit_owner: str,
+    valid_drops: list,
+    net_fault_events: list,
+    rally_idx: int,
+) -> dict:
+    """
+    Classify the outcome of a single rally for ability-metric consumption.
+
+    Priority order:
+        1. Net fault attributed to last_hit_owner        → CONFIRMED_ERROR
+        2. Validated drop, last hitter's shot landed IN  → WINNER
+        3. Validated drop, last hitter's shot landed OUT → CONFIRMED_ERROR
+        4. No reliable data                              → UNKNOWN  (no penalty)
+
+    Net-crossing direction is intentionally excluded: 2-D overhead video cannot
+    reliably determine whether the shuttle cleared the net in 3-D space.
+
+    Args:
+        last_hit_owner  : "top" | "bottom"
+        valid_drops     : list of validated drop dicts (post-filter)
+        net_fault_events: list of NetFaultEvent objects from NetJudge
+        rally_idx       : 1-based rally index for matching drop entries
+
+    Returns:
+        dict with keys:
+            lastHitOwner (str), resultType (str), isIn (bool|None), location (str|None)
+    """
+    # Priority 1: net fault by last hitter
+    # NetFaultEvent has .time_sec; we match by rally_idx approximation via drop timing.
+    # Since net faults are attached to the rally via hitter_side on NetCrossingEvent,
+    # we check if any net fault's hitter side matches last_hit_owner.
+    # (Simplified: if a net fault exists and is attributed to this player this rally.)
+    for fault in net_fault_events:
+        # NetFaultEvent does not carry owner; use the crossing direction from the
+        # corresponding NetCrossingEvent stored upstream. If unavailable, skip.
+        owner = getattr(fault, "owner", None)
+        if owner == last_hit_owner:
+            return {
+                "lastHitOwner": last_hit_owner,
+                "resultType":   "CONFIRMED_ERROR",
+                "isIn":         False,
+                "location":     "out",
+            }
+
+    # Priority 2 & 3: validated in/out data
+    matching = [d for d in valid_drops if d.get("rally_idx") == rally_idx]
+    if matching:
+        drop = matching[0]
+        is_in    = drop.get("is_in", False)
+        location = drop.get("result", {}).get("location", "out")
+        return {
+            "lastHitOwner": last_hit_owner,
+            "resultType":   "WINNER" if is_in else "CONFIRMED_ERROR",
+            "isIn":         is_in,
+            "location":     location,
+        }
+
+    # Priority 4: no reliable data
+    return {
+        "lastHitOwner": last_hit_owner,
+        "resultType":   "UNKNOWN",
+        "isIn":         None,
+        "location":     None,
+    }
+
+
+# ────────────────────────────────────────────────────────────
 # 메인 파이프라인 클래스
 # ────────────────────────────────────────────────────────────
 
@@ -661,6 +814,17 @@ class RallyTrackPipeline:
                 }
                 drop_results.append(drop_entry)
 
+        # ── Step 4.7-post: Filter false-positive In/Out detections ──
+        raw_drop_count = len(drop_results)
+        drop_results = [
+            d for d in drop_results
+            if validate_drop(d, hit_events, x_arr, y_arr, fps)
+        ]
+        print(
+            f"[In/Out 검증] {raw_drop_count}건 → {len(drop_results)}건 유효 "
+            f"({raw_drop_count - len(drop_results)}건 오판정 제거)"
+        )
+
         if drop_results:
             # ── 각 랠리의 X마크 지속 범위 계산 ──────────────────
             # 다음 랠리 시작 프레임 목록: hit_events 사이의 3초+ 갭 지점
@@ -684,6 +848,34 @@ class RallyTrackPipeline:
                     drop_by_frame[f] = drop_entry
         else:
             print("[Step 4.7] In/Out 판정 — 낙하 감지 없음")
+
+        # ── Build rally_results for backend ability metrics ──────────────────
+        rally_results: list = []
+        RALLY_GAP_SEC = 3.0
+        rally_idx = 1
+        for i, ev in enumerate(hit_events):
+            is_last = (i == len(hit_events) - 1)
+            if not is_last:
+                gap = (hit_events[i + 1].frame - ev.frame) / max(fps, 1.0)
+                if gap > RALLY_GAP_SEC:
+                    is_last = True
+            if is_last:
+                result = classify_rally_result(
+                    last_hit_owner   = ev.owner,
+                    valid_drops      = drop_results,
+                    net_fault_events = net_fault_events,
+                    rally_idx        = rally_idx,
+                )
+                rally_results.append({
+                    "rallyIdx":      rally_idx,
+                    "lastHitNumber": ev.hit_number,
+                    "lastHitOwner":  ev.owner,
+                    "resultType":    result["resultType"],
+                    "isIn":          result["isIn"],
+                    "location":      result["location"],
+                })
+                rally_idx += 1
+        print(f"[rally_results] {len(rally_results)}개 랠리 분류 완료")
 
         # 렌더링에서 빠른 조회를 위한 세트/딕셔너리
         hit_frames    = {e.frame for e in hit_events}
@@ -807,6 +999,59 @@ class RallyTrackPipeline:
         out_3.release()
         print(f"[Step 5] 완료 ({frame_idx}프레임, {time.time()-t0:.1f}s)")
 
+        # ── Compute player mobility metrics (home-zone return rate) ──
+        from analysis.minimap import compute_home_zone_minimap, point_in_zone
+
+        _pad = MINIMAP_CONFIG["padding"]
+        _mw  = MINIMAP_CONFIG["width"]
+        _mh  = MINIMAP_CONFIG["height"]
+
+        player_metrics: dict = {}
+
+        for side in ("top", "bottom"):
+            full_path  = minimap_renderer._player.get_full_path(side)
+            zone_min, zone_max = compute_home_zone_minimap(
+                hg["minimap_pts"], hg["net_y_minimap"], side, _mw, _mh, _pad
+            )
+
+            side_hits = [ev for ev in hit_events if ev.owner == side]
+
+            if len(side_hits) < 2 or len(full_path) < 5:
+                player_metrics[side] = {"homeReturnRate": None}
+                continue
+
+            total_frames = hit_events[-1].frame if hit_events else 1
+
+            def frame_to_path_idx(frame: int) -> int:
+                ratio = frame / max(total_frames, 1)
+                return int(ratio * len(full_path))
+
+            return_count = 0
+            pair_count   = 0
+
+            for k in range(len(side_hits) - 1):
+                hit_a = side_hits[k]
+                hit_b = side_hits[k + 1]
+
+                idx_a = frame_to_path_idx(hit_a.frame)
+                idx_b = frame_to_path_idx(hit_b.frame)
+                segment = full_path[idx_a:idx_b]
+
+                if not segment:
+                    continue
+
+                pair_count += 1
+                if any(point_in_zone(pt, zone_min, zone_max) for pt in segment):
+                    return_count += 1
+
+            home_return_rate = (
+                round(return_count / pair_count * 100)
+                if pair_count > 0 else None
+            )
+            player_metrics[side] = {"homeReturnRate": home_return_rate}
+
+        print(f"[기동력] top={player_metrics.get('top')}, bottom={player_metrics.get('bottom')}")
+
         # ── Step 7: H.264 재인코딩 ───────────────────────────
         print("[Step 6] H.264 인코딩")
         f1 = os.path.join(rd, f"{video_name}_1_main.mp4")
@@ -820,6 +1065,8 @@ class RallyTrackPipeline:
         api_data  = to_api_json(hit_events, fps)
         api_data["net_fault_events"]  = [e.to_dict() for e in net_fault_events]
         api_data["coordinate_mode"]   = hg["coordinate_mode"]
+        api_data["rallyResults"]       = rally_results
+        api_data["playerMetrics"]      = player_metrics
         api_data["drop_judgments"]     = [
             {
                 "rally_idx":       d["rally_idx"],
