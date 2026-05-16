@@ -30,6 +30,9 @@ from .config import MINIMAP_CONFIG, POSE_CONFIG
 from .court import (
     create_minimap_canvas,
     frame_to_minimap,
+    _bwf_to_canvas,
+    BWF_X,
+    BWF_Y,
 )
 from .impact import ImpactEvent, build_hit_lookup
 
@@ -59,10 +62,12 @@ class _RoleState:
     """Top 또는 Bottom 슬롯의 최근 궤적을 저장한다."""
 
     def __init__(self) -> None:
-        self.path: deque[Tuple[int, int]] = deque(maxlen=TRAIL_LEN)
+        self.path:      deque[Tuple[int, int]]         = deque(maxlen=TRAIL_LEN)
+        self.full_path: List[Tuple[int, int, int]]     = []   # (frame_idx, mx, my) — no length cap
 
-    def add(self, mx: int, my: int) -> None:
+    def add(self, frame_idx: int, mx: int, my: int) -> None:
         self.path.append((mx, my))
+        self.full_path.append((frame_idx, mx, my))
 
     @property
     def last_pos(self) -> Optional[Tuple[int, int]]:
@@ -91,6 +96,7 @@ class PlayerTracker:
 
     def update(
         self,
+        frame_idx:         int,
         keypoints_list:    list,
         to_minimap_matrix: np.ndarray,
         minimap_pts:       np.ndarray,
@@ -125,9 +131,9 @@ class PlayerTracker:
 
         # 선정된 후보만 해당 슬롯에 추가
         if top_candidate is not None:
-            self._top.add(top_candidate[1], top_candidate[2])
+            self._top.add(frame_idx, top_candidate[1], top_candidate[2])
         if bottom_candidate is not None:
-            self._bottom.add(bottom_candidate[1], bottom_candidate[2])
+            self._bottom.add(frame_idx, bottom_candidate[1], bottom_candidate[2])
 
     # ── 위치 조회 (HitMarkerRenderer 용) ──────────────────────
 
@@ -135,6 +141,10 @@ class PlayerTracker:
         if side == "top":
             return self._top.last_pos
         return self._bottom.last_pos
+
+    def get_full_path(self, side: str) -> List[Tuple[int, int, int]]:
+        """Return the complete frame-level position history as (frame_idx, mx, my) tuples."""
+        return self._top.full_path if side == "top" else self._bottom.full_path
 
     # ── 렌더링 ───────────────────────────────────────────────
 
@@ -206,15 +216,13 @@ class MinimapRenderer:
     def render_frame(
         self,
         frame_idx:      int,
-        shuttle_x:      float,
-        shuttle_y:      float,
         keypoints_list: list,
     ) -> np.ndarray:
         hg     = self._hg
         canvas = create_minimap_canvas()
 
         parsed = _to_dict_format(keypoints_list)
-        self._player.update(parsed, hg["to_minimap"], hg["minimap_pts"])
+        self._player.update(frame_idx, parsed, hg["to_minimap"], hg["minimap_pts"])
 
         if frame_idx in self._hit_lookup:
             self._hit_marker.register(self._hit_lookup[frame_idx], self._player)
@@ -224,6 +232,67 @@ class MinimapRenderer:
         self._player.draw_dots(canvas)
 
         return canvas
+
+
+# ────────────────────────────────────────────────────────────
+# 홈존 계산 (기동력 메트릭용)
+# ────────────────────────────────────────────────────────────
+
+def compute_home_zone_minimap(
+    side: str,
+    minimap_w: int,
+    minimap_h: int,
+    pad: int,
+) -> Tuple[Tuple[int, int], Tuple[int, int]]:
+    """
+    Compute the home-zone bounding box in minimap pixel coordinates.
+
+    Home zone is defined in BWF physical coordinates (metres) and converted
+    via _bwf_to_canvas() so it adapts to any court input layout.
+
+    Singles court centre line: x = 3.05m.
+    Home zone x-width: ±1.3m from centre  → (1.75, 4.35)
+    Short service line: near=4.72m, far=8.68m.
+
+    Bottom player home: short_service_far(8.68m) ±1.0m  → (7.68, 9.68)
+    Top    player home: short_service_near(4.72m) ±1.0m → (3.72, 5.72)
+
+    Returns:
+        ( (x_min_px, y_min_px), (x_max_px, y_max_px) )  — minimap pixel bbox
+    """
+    x_lo_m = BWF_X["center"] - 1.3   # 1.75m
+    x_hi_m = BWF_X["center"] + 1.3   # 4.35m
+
+    if side == "bottom":
+        # 숏 서비스 라인(8.68m) 기준 ±1.0m
+        y_lo_m = BWF_Y["short_service_far"] - 1.0   # 7.68m
+        y_hi_m = BWF_Y["short_service_far"] + 1.0   # 9.68m
+    else:
+        # 숏 서비스 라인(4.72m) 기준 ±1.0m
+        y_lo_m = BWF_Y["short_service_near"] - 1.0  # 3.72m
+        y_hi_m = BWF_Y["short_service_near"] + 1.0  # 5.72m
+
+    corners_bwf = [
+        (x_lo_m, y_lo_m),
+        (x_hi_m, y_lo_m),
+        (x_hi_m, y_hi_m),
+        (x_lo_m, y_hi_m),
+    ]
+    px_pts = [
+        _bwf_to_canvas(x, y, minimap_w, minimap_h, pad)
+        for x, y in corners_bwf
+    ]
+    xs = [int(p[0]) for p in px_pts]
+    ys = [int(p[1]) for p in px_pts]
+    return (min(xs), min(ys)), (max(xs), max(ys))
+
+
+def point_in_zone(
+    pt: Tuple[int, int],
+    zone_min: Tuple[int, int],
+    zone_max: Tuple[int, int],
+) -> bool:
+    return zone_min[0] <= pt[0] <= zone_max[0] and zone_min[1] <= pt[1] <= zone_max[1]
 
 
 # ────────────────────────────────────────────────────────────
