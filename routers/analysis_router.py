@@ -182,7 +182,7 @@ def run_analysis(
             "hitsData":       api_data["hits_data"],
             "netFaultEvents": api_data.get("net_fault_events", []),
             "rallyResults":   api_data.get("rallyResults", []),
-            "playerMetrics":  api_data.get("playerMetrics", {}),
+            "player_metrics":  api_data.get("playerMetrics", {}),
         }
         if skeleton_video_url:
             callback_data["skeletonVideoUrl"] = skeleton_video_url

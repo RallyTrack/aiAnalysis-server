@@ -988,7 +988,7 @@ class RallyTrackPipeline:
             side_hits = [ev for ev in hit_events if ev.owner == side]
 
             if len(side_hits) < 2 or len(full_path) < 5:
-                player_metrics[side] = {"homeReturnRate": None}
+                player_metrics[side] = {"home_return_rate": None}
                 continue
 
             frame_keys = [p[0] for p in full_path]
@@ -1013,7 +1013,7 @@ class RallyTrackPipeline:
                 round(return_count / pair_count * 100)
                 if pair_count > 0 else None
             )
-            player_metrics[side] = {"homeReturnRate": home_return_rate}
+            player_metrics[side] = {"home_return_rate": home_return_rate}
 
         print(f"[기동력] top={player_metrics.get('top')}, bottom={player_metrics.get('bottom')}")
 
