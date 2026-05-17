@@ -138,6 +138,23 @@ class ImpactEvent:
     method:            str            = "peaks"
     stroke_type:       Optional[str]  = None
     stroke_confidence: Optional[float] = None
+
+    # ── Feature-based 분류기 (사용 시) 보강 필드. ViT-only fallback 시 None 유지 ──
+    # 2026-05-17: feature classifier (sklearn HGB) 도입 시 추가.
+    #
+    # stroke_top2 / stroke_top2_confidence: 2-위 후보 (UX 에서 alternative 제시)
+    # stroke_source: 어떤 분류기가 결정했는지 ("feature_classifier" | "vit_only" | "rule_prior")
+    # stroke_is_uncertain: top1-top2 차이 작을 때 (분류 모호) True
+    # stroke_probs: 전체 클래스 probs (frontend 시각화/디버깅용). 클래스 순서는
+    #               classifier 의 ``class_names`` 와 일치 (분류기마다 9 또는 4).
+    # stroke_class_scheme: "9class" | "4class_amateur" 등. 어떤 schema 로 분류했는지.
+    stroke_top2:            Optional[str]   = None
+    stroke_top2_confidence: Optional[float] = None
+    stroke_source:          Optional[str]   = None
+    stroke_is_uncertain:    Optional[bool]  = None
+    stroke_probs:           Optional[list]  = None  # length = scheme class count
+    stroke_class_scheme:    Optional[str]   = None
+
     # 타격 시점 선수 중심 좌표 (프레임 크기 대비 0.0~1.0 정규화)
     # pipeline_service.py에서 포즈 추출 후 주입됨. 없으면 None.
     player_x: Optional[float] = None   # 좌→우
@@ -153,6 +170,18 @@ class ImpactEvent:
         if self.stroke_type is not None:
             d["stroke_type"]       = self.stroke_type
             d["stroke_confidence"] = round(self.stroke_confidence, 3)
+            # Feature classifier 사용 시 추가 출력. ViT-only 면 모두 None 이라 skip.
+            if self.stroke_top2 is not None:
+                d["stroke_top2"]            = self.stroke_top2
+                d["stroke_top2_confidence"] = round(self.stroke_top2_confidence, 3)
+            if self.stroke_source is not None:
+                d["stroke_source"] = self.stroke_source
+            if self.stroke_is_uncertain is not None:
+                d["stroke_is_uncertain"] = self.stroke_is_uncertain
+            if self.stroke_probs is not None:
+                d["stroke_probs"] = [round(p, 4) for p in self.stroke_probs]
+            if self.stroke_class_scheme is not None:
+                d["stroke_class_scheme"] = self.stroke_class_scheme
         # 선수 위치 — 포즈 데이터가 주입된 경우에만 포함 (기존 API 하위 호환)
         if self.player_x is not None:
             d["player_x"] = round(self.player_x, 4)

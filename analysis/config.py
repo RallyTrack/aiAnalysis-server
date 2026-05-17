@@ -20,6 +20,30 @@ PATHS = {
     "inpaintnet_ckpt": os.path.join(BASE_DIR, "tracknetv3", "ckpts", "InpaintNet_best.pt"),
     "yolo_model":      os.path.join(BASE_DIR, "weights", "yolov8n-pose.pt"),
     "stroke_weights_dir": os.path.join(BASE_DIR, "weights", "stroke"),
+    # Feature-based stroke classifier (sklearn, trajectory+pose+ViT teacher 융합).
+    # ViT-only (stroke_classifier.py) 와 별도. 둘 다 있으면 Step 4.8 에서 feature 우선.
+    "stroke_feature_classifier_pro":     os.path.join(BASE_DIR, "weights", "stroke",
+                                                     "feature_classifier_pro.pkl"),
+    "stroke_feature_classifier_amateur": os.path.join(BASE_DIR, "weights", "stroke",
+                                                     "feature_classifier_amateur.pkl"),
+}
+
+
+# ─────────────────────────────────────────────
+# 스트로크 분류 설정
+# ─────────────────────────────────────────────
+STROKE_CONFIG = {
+    # "pro" | "amateur" — 영상 도메인. amateur 는 4-class (Serve/Smash/Clear/Drive).
+    # pipeline_service 호출자가 override 가능 (mode 인자).
+    "mode": "pro",
+
+    # Rally-aware Serve 강등 임계 (초). 이전 hit 와 시간 gap < N 이면 Serve 예측을
+    # top2 로 강등. 학습 데이터가 rally context feature 를 학습 못한 한계 보정.
+    # 0 = 비활성화.
+    "serve_rally_gap_sec": 3.0,
+
+    # Feature 분류기 불확실성 margin. top1 - top2 < margin → is_uncertain=True.
+    "uncertainty_margin": 0.10,
 }
 
 # ─────────────────────────────────────────────

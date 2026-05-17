@@ -11,6 +11,9 @@ httpx==0.28.1
 torch==2.10.0
 torchvision==0.25.0
 ultralytics==8.4.19
+# Feature-based stroke classifier (Step 4.8) — sklearn pipeline 로드/추론.
+# 2026-05-17 추가. HistGradientBoosting / LogisticRegression 등.
+scikit-learn==1.6.1
 
 # ── 영상 처리 ───────────────────────────────────────────
 opencv-python==4.13.0.92
