@@ -205,7 +205,7 @@ ANALYSIS_MODE_PROFILES = {
 
 
 def _mode_profile(mode: str) -> tuple[str, dict]:
-    normalized = mode if mode in ANALYSIS_MODE_PROFILES else "amateur"
+    normalized = mode if mode in ANALYSIS_MODE_PROFILES else "pro"
     return normalized, ANALYSIS_MODE_PROFILES[normalized]
 
 
@@ -642,7 +642,7 @@ class RallyTrackPipeline:
         video_path:   str,
         user_corners: Optional[List[List[float]]] = None,
         net_coords:   Optional[List[List[float]]] = None,
-        mode:         str = "amateur",
+        mode:         str = "pro",
         verbose:      bool = False,
     ) -> dict:
         """

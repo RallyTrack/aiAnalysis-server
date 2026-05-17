@@ -54,7 +54,7 @@ class AnalyzeRequest(BaseModel):
     minimapUploadUrl: str = ""
     minimapVideoUrl: str = ""
     courtCorners: Optional[CourtCorners] = None
-    mode: Literal["pro", "amateur"] = "amateur"
+    mode: Literal["pro", "amateur"] = "pro"
 
 
 @router.post("/analyze")
@@ -124,7 +124,7 @@ def run_analysis(
     minimap_upload_url: str = "",
     minimap_video_url: str = "",
     court_corners: Optional[CourtCorners] = None,
-    mode: Literal["pro", "amateur"] = "amateur",
+    mode: Literal["pro", "amateur"] = "pro",
 ):
     """
     실제 분석 파이프라인.
