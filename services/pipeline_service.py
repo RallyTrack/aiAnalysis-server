@@ -1026,6 +1026,60 @@ class RallyTrackPipeline:
         reencode_h264(tmp_2, f2)
         reencode_h264(tmp_3, f3)
 
+        # ── Step 7.9: 각 타점에 히트맵 좌표 주입 ──────────────
+        # minimap_renderer._player.get_full_path(side)에서
+        # 미니맵 영상에 실제로 그려진 선수 위치(mx, my)를 가져온다.
+        # 이 좌표가 미니맵과 완전히 동일한 소스.
+        _mm_pts  = hg["minimap_pts"]   # [TL, TR, BR, BL]
+        _net_y   = float(hg["net_y_minimap"])
+        _ct_x_min = float(min(_mm_pts[0][0], _mm_pts[3][0]))
+        _ct_x_max = float(max(_mm_pts[1][0], _mm_pts[2][0]))
+        _ct_y_min = float(min(_mm_pts[0][1], _mm_pts[1][1]))
+        _ct_y_max = float(max(_mm_pts[2][1], _mm_pts[3][1]))
+        _ct_w = max(_ct_x_max - _ct_x_min, 1.0)
+        _ct_h = max(_ct_y_max - _ct_y_min, 1.0)
+        _net_pct = (_net_y - _ct_y_min) / _ct_h * 100
+
+        # 선수별 full_path: {frame_idx: (mx, my)} 로 변환
+        _player_pos: dict = {}
+        for _side in ("top", "bottom"):
+            _fp = minimap_renderer._player.get_full_path(_side)
+            for (_fi, _mx, _my) in _fp:
+                if _side not in _player_pos:
+                    _player_pos[_side] = {}
+                _player_pos[_side][_fi] = (_mx, _my)
+
+        for ev in hit_events:
+            heatmap_set = False
+
+            # ── 우선: minimap_renderer의 실제 선수 위치 사용 ──
+            side_path = _player_pos.get(ev.owner, {})
+            for delta in [0, 1, -1, 2, -2, 3, -3]:
+                fi = ev.frame + delta
+                if fi not in side_path:
+                    continue
+                mx, my = side_path[fi]
+                if mx <= 0 and my <= 0:
+                    continue
+                # 코트 내 0~100 정규화
+                hm_x = (float(mx) - _ct_x_min) / _ct_w * 100
+                hm_y = (float(my) - _ct_y_min) / _ct_h * 100
+                hm_x = max(2.0, min(98.0, hm_x))
+                # top/bottom 절반 강제
+                if ev.owner == "top":
+                    hm_y = max(2.0, min(_net_pct - 2, hm_y))
+                else:
+                    hm_y = max(_net_pct + 2, min(98.0, hm_y))
+                ev.minimap_x = round(hm_x, 2)
+                ev.minimap_y = round(hm_y, 2)
+                heatmap_set = True
+                break
+
+            # ── 폴백: 코트 중앙 ──
+            if not heatmap_set:
+                ev.minimap_x = 50.0
+                ev.minimap_y = (_net_pct / 2) if ev.owner == "top" else (_net_pct + (100 - _net_pct) / 2)
+
         # ── Step 8: JSON 생성 ─────────────────────────────────
         api_data  = to_api_json(hit_events, fps)
         api_data["net_fault_events"]  = [e.to_dict() for e in net_fault_events]
