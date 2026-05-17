@@ -33,7 +33,7 @@ import numpy as np
 import pandas as pd
 from ultralytics import YOLO
 
-from analysis.config        import PATHS, TRACKNET_CONFIG, MINIMAP_CONFIG, POSE_CONFIG
+from analysis.config        import PATHS, TRACKNET_CONFIG, MINIMAP_CONFIG, POSE_CONFIG, STROKE_CONFIG
 from analysis.court         import (
     compute_homographies, classify_drop_location, frame_to_minimap,
 )
@@ -48,6 +48,7 @@ _stroke_classifier_loaded = False
 
 
 def _get_stroke_classifier():
+    """ViT 5-fold ensemble — ViT-only fallback 및 feature classifier 의 teacher 로 사용."""
     global _stroke_classifier, _stroke_classifier_loaded
     if not _stroke_classifier_loaded:
         _stroke_classifier_loaded = True
@@ -57,6 +58,134 @@ def _get_stroke_classifier():
         except Exception as e:
             print(f"[StrokeClassifier] 초기화 실패 (스트로크 분류 생략): {e}")
     return _stroke_classifier
+
+
+# Feature-based classifier 는 mode 별로 다른 pkl. lazy + per-mode memoize.
+_feature_classifier_cache: dict = {}
+
+
+def _get_feature_classifier(mode: str):
+    """sklearn feature classifier lazy load.
+
+    Args:
+        mode: "pro" | "amateur". 다른 값이면 pro fallback.
+
+    Returns:
+        ``TrainedStrokeModel`` 또는 None (pkl 없거나 로드 실패 시).
+    """
+    key = mode if mode in ("pro", "amateur") else "pro"
+    if key in _feature_classifier_cache:
+        return _feature_classifier_cache[key]
+
+    pkl_key = (f"stroke_feature_classifier_{key}")
+    pkl_path = PATHS.get(pkl_key)
+    if not pkl_path or not os.path.exists(pkl_path):
+        print(f"[FeatureClassifier:{key}] pkl 없음: {pkl_path} → 캐시 None")
+        _feature_classifier_cache[key] = None
+        return None
+
+    try:
+        from analysis.stroke_feature_classifier import TrainedStrokeModel
+        model = TrainedStrokeModel.load(Path(pkl_path))
+        print(f"[FeatureClassifier:{key}] loaded "
+              f"{model.model_name}/{model.label_scheme} "
+              f"({len(model.class_names)}-class)")
+        _feature_classifier_cache[key] = model
+        return model
+    except Exception as e:
+        print(f"[FeatureClassifier:{key}] 로드 실패: {e}")
+        _feature_classifier_cache[key] = None
+        return None
+
+
+def _build_feature_inputs_for_event(
+    ev,
+    video_path: str,
+    df_ball,
+    pose_at_hits: dict,
+    hg: dict,
+    net_y_pixel,
+    vit_ensemble,
+):
+    """단일 ImpactEvent → ``FeatureInputs`` 변환.
+
+    Args:
+        ev: ImpactEvent (frame, hit_number 포함)
+        video_path: 원본 영상 경로 (ViT teacher offset frame 추출용)
+        df_ball: TrackNet 출력 DataFrame (컬럼 Frame/X/Y/Visibility)
+        pose_at_hits: {frame_idx: [pose_dict, ...]} (Step 4.5 에서 수집)
+        hg: compute_homographies 결과 dict
+        net_y_pixel: 네트 픽셀 y (frame_h * net_y_ratio)
+        vit_ensemble: StrokeClassifierEnsemble (offset 별 frame 추론용)
+    """
+    import cv2 as _cv2
+    import numpy as _np
+    from analysis.stroke_features import FeatureInputs, VIT_OFFSETS
+
+    # ── 1) ViT teacher 5-offset probs (-2..+2) ──
+    probs_by_off: dict = {}
+    cap = _cv2.VideoCapture(str(video_path))
+    try:
+        for off in VIT_OFFSETS:
+            tgt = ev.frame + off
+            if tgt < 0:
+                continue
+            cap.set(_cv2.CAP_PROP_POS_FRAMES, tgt)
+            ok, bgr = cap.read()
+            if not ok:
+                continue
+            r = vit_ensemble.classify(bgr)
+            probs_by_off[off] = r.probs.astype(_np.float32)
+    finally:
+        cap.release()
+
+    # ── 2) shuttle 위치 (hit frame) ──
+    shuttle_xy = None
+    if df_ball is not None and len(df_ball) > 0:
+        at = df_ball[(df_ball["Frame"] == ev.frame) & (df_ball["Visibility"] == 1)]
+        if not at.empty:
+            shuttle_xy = (float(at["X"].iloc[0]), float(at["Y"].iloc[0]))
+
+    # ── 3) hitter pose — 셔틀에 가장 가까운 손목의 사람 ──
+    def _find_hitter_kp(pose_list, shuttle):
+        if not pose_list or shuttle is None:
+            return None
+        sx, sy = shuttle
+        best, best_d = None, float("inf")
+        for p in pose_list:
+            kp = _np.asarray(p.get("keypoints", []), dtype=_np.float32)
+            if kp.shape != (17, 3):
+                continue
+            for idx in (9, 10):    # COCO wrist
+                x, y, c = kp[idx]
+                if c < 0.3:
+                    continue
+                d = _np.hypot(x - sx, y - sy)
+                if d < best_d:
+                    best_d = d
+                    best = kp
+        return best
+
+    kp     = _find_hitter_kp(pose_at_hits.get(ev.frame), shuttle_xy)
+    kp_pre = _find_hitter_kp(pose_at_hits.get(ev.frame - 2), shuttle_xy)
+    kp_post = _find_hitter_kp(pose_at_hits.get(ev.frame + 2), shuttle_xy)
+
+    return FeatureInputs(
+        video_path=Path(video_path),
+        hit_frame=ev.frame,
+        hit_number=ev.hit_number,
+        ball_df=df_ball,
+        net_y=net_y_pixel,
+        impact_xy_pixel=shuttle_xy,
+        homography_matrix=hg.get("M") if isinstance(hg, dict) else None,
+        prev_hit_gap_sec=None,
+        next_hit_gap_sec=None,
+        hitter_kp_at_hit=kp,
+        hitter_kp_pre=kp_pre,
+        hitter_kp_post=kp_post,
+        shuttle_xy_at_hit=shuttle_xy,
+        vit_probs_by_offset=probs_by_off,
+    )
 
 
 ANALYSIS_MODE_PROFILES = {
@@ -76,7 +205,7 @@ ANALYSIS_MODE_PROFILES = {
 
 
 def _mode_profile(mode: str) -> tuple[str, dict]:
-    normalized = mode if mode in ANALYSIS_MODE_PROFILES else "amateur"
+    normalized = mode if mode in ANALYSIS_MODE_PROFILES else "pro"
     return normalized, ANALYSIS_MODE_PROFILES[normalized]
 
 
@@ -513,7 +642,7 @@ class RallyTrackPipeline:
         video_path:   str,
         user_corners: Optional[List[List[float]]] = None,
         net_coords:   Optional[List[List[float]]] = None,
-        mode:         str = "amateur",
+        mode:         str = "pro",
         verbose:      bool = False,
     ) -> dict:
         """
@@ -729,22 +858,102 @@ class RallyTrackPipeline:
         print(f"[Step 4.6] 교대 owner 재할당 완료 → {len(hit_events)}개")
 
         # ── Step 4.8: 스트로크 분류 ──────────────────────────────
-        print("[Step 4.8] 스트로크 분류")
-        clf = _get_stroke_classifier()
-        if clf is not None and hit_events:
-            classified = 0
+        # 우선순위: Feature classifier (sklearn, traj+pose+ViT teacher 융합)
+        #          → 없거나 실패 시 ViT-only fallback (legacy)
+        #          → 둘 다 없으면 stroke 필드 None 유지
+        # mode 별로 다른 feature classifier 로드 (pro 9-class / amateur 4-class).
+        print(f"[Step 4.8] 스트로크 분류 (mode={mode})")
+        feature_clf = _get_feature_classifier(mode)
+        vit_ensemble = _get_stroke_classifier()  # teacher 겸 fallback
+
+        feature_classified = 0
+        if feature_clf is not None and vit_ensemble is not None and hit_events:
+            print(f"           feature classifier ({feature_clf.label_scheme}, "
+                  f"{len(feature_clf.class_names)}-class)")
+            df_ball = pd.read_csv(csv_path)
+            # 컬럼 통일 — TrackNet CSV 는 'Frame X Y Visibility' (대문자).
+            # load_trajectory_csv 는 소문자화하지만 여기선 원본 그대로 사용.
+            df_ball.columns = [
+                {"frame": "Frame", "x": "X", "y": "Y", "visibility": "Visibility"}
+                .get(c.strip().lower(), c) for c in df_ball.columns
+            ]
+            net_y_pixel = frame_h * net_y_ratio
+
             for ev in hit_events:
                 try:
-                    result = clf.classify_at(video_path, ev.frame)
-                    ev.stroke_type       = result.class_name
-                    ev.stroke_confidence = result.confidence
-                    classified += 1
-                    print(f"           #{ev.hit_number:02d} → {result.class_name} ({result.confidence:.2f})")
+                    from analysis.stroke_features import compute_features
+                    inputs = _build_feature_inputs_for_event(
+                        ev, video_path, df_ball, pose_at_hits or {},
+                        hg, net_y_pixel, vit_ensemble,
+                    )
+                    feats = compute_features(inputs)
+                    feats_df = pd.DataFrame([feats])
+                    # 모델이 학습 시 본 컬럼만, 순서 유지. 누락 컬럼은 NaN.
+                    for col in feature_clf.feature_columns:
+                        if col not in feats_df.columns:
+                            feats_df[col] = float("nan")
+                    feats_df = feats_df[feature_clf.feature_columns]
+
+                    pred = feature_clf.predict_with_meta(
+                        feats_df,
+                        uncertainty_margin=STROKE_CONFIG["uncertainty_margin"],
+                    )[0]
+                    ev.stroke_type            = pred["label_name"]
+                    ev.stroke_confidence      = float(pred["confidence"])
+                    ev.stroke_top2            = pred["top2_name"]
+                    ev.stroke_top2_confidence = float(pred["top2_conf"])
+                    ev.stroke_is_uncertain    = bool(pred["is_uncertain"])
+                    ev.stroke_probs           = pred["probs"].tolist()
+                    ev.stroke_source          = "feature_classifier"
+                    ev.stroke_class_scheme    = feature_clf.label_scheme
+                    feature_classified += 1
+                    print(f"           #{ev.hit_number:02d} → "
+                          f"{pred['label_name']} ({pred['confidence']:.2f})")
                 except Exception as exc:
-                    print(f"           #{ev.hit_number:02d} 분류 실패: {exc}")
-            print(f"           → {classified}/{len(hit_events)}개 분류 완료")
-        else:
-            print("           → 스트로크 분류기 없음 (weights/stroke/ 확인 필요)")
+                    print(f"           #{ev.hit_number:02d} feature 분류 실패: {exc}")
+            print(f"           → feature classifier: {feature_classified}/{len(hit_events)}개 완료")
+
+            # ── Rally-aware Serve 강등 (학습 데이터의 rally context 부재 보정) ──
+            gap_thresh = STROKE_CONFIG.get("serve_rally_gap_sec", 3.0)
+            if gap_thresh > 0:
+                events_sorted = sorted(
+                    [e for e in hit_events if e.stroke_type is not None],
+                    key=lambda e: e.frame,
+                )
+                serve_demoted = 0
+                for i in range(1, len(events_sorted)):
+                    e = events_sorted[i]
+                    if e.stroke_type != "Serve" or e.stroke_top2 is None:
+                        continue
+                    gap = e.time_sec - events_sorted[i - 1].time_sec
+                    if gap >= gap_thresh:
+                        continue
+                    # top1 ↔ top2 swap.
+                    e.stroke_type, e.stroke_top2 = e.stroke_top2, e.stroke_type
+                    e.stroke_confidence, e.stroke_top2_confidence = (
+                        e.stroke_top2_confidence, e.stroke_confidence)
+                    serve_demoted += 1
+                if serve_demoted:
+                    print(f"           [rally-aware] Serve 강등 {serve_demoted}건 "
+                          f"(gap < {gap_thresh}s)")
+
+        # ── ViT-only fallback — feature classifier 안 돌았거나 일부 실패 ──
+        unclassified = [e for e in hit_events if e.stroke_type is None]
+        if vit_ensemble is not None and unclassified:
+            print(f"           ViT-only fallback ({len(unclassified)}개)")
+            for ev in unclassified:
+                try:
+                    result = vit_ensemble.classify_at(video_path, ev.frame)
+                    ev.stroke_type       = result.class_name
+                    ev.stroke_confidence = float(result.confidence)
+                    ev.stroke_source     = "vit_only"
+                    print(f"           #{ev.hit_number:02d} → "
+                          f"{result.class_name} ({result.confidence:.2f})")
+                except Exception as exc:
+                    print(f"           #{ev.hit_number:02d} ViT 분류 실패: {exc}")
+
+        if feature_clf is None and vit_ensemble is None:
+            print("           → 스트로크 분류기 없음 (weights/stroke/ 확인)")
 
         # ── Step 4.7: In/Out 판정 (랠리 종료 낙하 지점) ────────
         rally_drops = self._find_rally_drops(hit_events, x_arr, y_arr, fps)
