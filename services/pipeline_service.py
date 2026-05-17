@@ -436,25 +436,35 @@ def classify_rally_result(
     valid_drops: list,
     rally_idx: int,
 ) -> dict:
-    # Priority 1: validated in/out landing data
     matching = [d for d in valid_drops if d.get("rally_idx") == rally_idx]
     if matching:
-        drop     = matching[0]
-        is_in    = drop.get("is_in", False)
-        location = drop.get("result", {}).get("location", "out")
+        drop        = matching[0]
+        is_in       = drop.get("is_in", False)
+        result_dict = drop.get("result", {})
+        location    = result_dict.get("location", "out")
+        margin_cm   = result_dict.get("margin_cm", None)
+
+        if margin_cm is not None:
+            confidence = "HIGH" if abs(margin_cm) >= 10.0 else "LOW"
+        else:
+            confidence = None
+
         return {
             "lastHitOwner": last_hit_owner,
             "resultType":   "WINNER" if is_in else "CONFIRMED_ERROR",
             "isIn":         is_in,
             "location":     location,
+            "marginCm":     round(margin_cm, 1) if margin_cm is not None else None,
+            "confidence":   confidence,
         }
 
-    # Priority 2: no reliable data → neutral, no penalty
     return {
         "lastHitOwner": last_hit_owner,
         "resultType":   "UNKNOWN",
         "isIn":         None,
         "location":     None,
+        "marginCm":     None,
+        "confidence":   None,
     }
 
 
@@ -833,9 +843,14 @@ class RallyTrackPipeline:
                     "resultType":    result["resultType"],
                     "isIn":          result["isIn"],
                     "location":      result["location"],
+                    "marginCm":      result.get("marginCm"),
+                    "confidence":    result.get("confidence"),
                 })
                 rally_idx += 1
         print(f"[rally_results] {len(rally_results)}개 랠리 분류 완료")
+        for r in rally_results:
+            margin_str = f"marginCm={r['marginCm']}" if r['marginCm'] is not None else "marginCm=None"
+            print(f"  Rally #{r['rallyIdx']}: {r['resultType']}, {r['location']}, {margin_str}, confidence={r['confidence']}")
 
         # 렌더링에서 빠른 조회를 위한 세트/딕셔너리
         hit_frames    = {e.frame for e in hit_events}
@@ -988,7 +1003,8 @@ class RallyTrackPipeline:
             side_hits = [ev for ev in hit_events if ev.owner == side]
 
             if len(side_hits) < 2 or len(full_path) < 5:
-                player_metrics[side] = {"home_return_rate": None}
+                print(f"[기동력] {side} 데이터 부족 — side_hits={len(side_hits)}, full_path={len(full_path)}")
+                player_metrics[side] = {"home_return_rate": 0.0}
                 continue
 
             frame_keys = [p[0] for p in full_path]
@@ -1010,8 +1026,8 @@ class RallyTrackPipeline:
                     return_count += 1
 
             home_return_rate = (
-                round(return_count / pair_count * 100)
-                if pair_count > 0 else None
+                round(return_count / pair_count, 2)
+                if pair_count > 0 else 0.0
             )
             player_metrics[side] = {"home_return_rate": home_return_rate}
 
