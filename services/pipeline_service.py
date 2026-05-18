@@ -907,8 +907,6 @@ class RallyTrackPipeline:
                     ev.stroke_source          = "feature_classifier"
                     ev.stroke_class_scheme    = feature_clf.label_scheme
                     feature_classified += 1
-                    print(f"           #{ev.hit_number:02d} → "
-                          f"{pred['label_name']} ({pred['confidence']:.2f})")
                 except Exception as exc:
                     print(f"           #{ev.hit_number:02d} feature 분류 실패: {exc}")
             print(f"           → feature classifier: {feature_classified}/{len(hit_events)}개 완료")
@@ -933,9 +931,19 @@ class RallyTrackPipeline:
                     e.stroke_confidence, e.stroke_top2_confidence = (
                         e.stroke_top2_confidence, e.stroke_confidence)
                     serve_demoted += 1
+                    print(f"           #{e.hit_number:02d} Serve 강등 → {e.stroke_type} "
+                          f"({e.stroke_confidence:.2f}) [gap={gap:.1f}s < {gap_thresh}s]")
                 if serve_demoted:
                     print(f"           [rally-aware] Serve 강등 {serve_demoted}건 "
                           f"(gap < {gap_thresh}s)")
+
+            # ── 최종 분류 결과 출력 (강등 후 실제 저장되는 값 기준) ──
+            for ev in hit_events:
+                if ev.stroke_type is not None and ev.stroke_source == "feature_classifier":
+                    uncertain_flag = " [불확실]" if ev.stroke_is_uncertain else ""
+                    print(f"           #{ev.hit_number:02d} → "
+                          f"{ev.stroke_type} ({ev.stroke_confidence:.2f})"
+                          f"{uncertain_flag}")
 
         # ── ViT-only fallback — feature classifier 안 돌았거나 일부 실패 ──
         unclassified = [e for e in hit_events if e.stroke_type is None]
