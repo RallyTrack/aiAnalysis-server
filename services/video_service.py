@@ -23,11 +23,12 @@ def download_video(s3_url: str) -> str:
 
     print(f"[영상 다운로드] {s3_url} → {local_path}")
 
-    response = httpx.get(s3_url, timeout=120.0)
-    response.raise_for_status()
-
-    with open(local_path, "wb") as f:
-        f.write(response.content)
+    # 스트리밍 다운로드: 영상 전체를 RAM에 올리지 않고 1MB 단위로 디스크에 기록
+    with httpx.stream("GET", s3_url, timeout=httpx.Timeout(10.0, read=600.0)) as response:
+        response.raise_for_status()
+        with open(local_path, "wb") as f:
+            for chunk in response.iter_bytes(1024 * 1024):
+                f.write(chunk)
 
     size_mb = os.path.getsize(local_path) / 1024 / 1024
     print(f"[영상 다운로드 완료] 크기: {size_mb:.1f}MB")

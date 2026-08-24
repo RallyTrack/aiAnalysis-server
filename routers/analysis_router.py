@@ -9,17 +9,71 @@ RallyTrack AI 분석 라우터
   - run_analysis()에 좌표 데이터 전달
 """
 import os
+import sys
+import threading
+import time
+from contextlib import redirect_stdout
 from typing import Literal, Optional
 
 import httpx
 from fastapi import APIRouter, BackgroundTasks
 from pydantic import BaseModel
 
-from config.settings import BACKEND_URL
+from config.settings import BACKEND_URL, CALLBACK_SECRET, SLACK_ANALYSIS_WEBHOOK
 from services.video_service import cleanup_video, download_video
 from services.pipeline_service import RallyTrackPipeline
 
 router = APIRouter()
+
+# 분석 잡 직렬화: 파이프라인이 겹치면 전체가 수 배 느려지므로 한 번에 하나만 실행
+_job_semaphore = threading.Semaphore(1)
+
+
+def _notify_slack(text: str):
+    """Slack 알림 (webhook 미설정 시 no-op, 실패해도 분석에 영향 없음)"""
+    if not SLACK_ANALYSIS_WEBHOOK:
+        return
+    try:
+        httpx.post(SLACK_ANALYSIS_WEBHOOK, json={"text": text}, timeout=5.0)
+    except Exception:
+        pass
+
+
+class _SlackStepLogger:
+    """
+    파이프라인의 print 로그를 저널(stdout)에 그대로 남기면서,
+    '['로 시작하는 단계 로그만 모아 Slack으로 배치 전송한다.
+    (10줄 이상 쌓이거나 마지막 전송 후 15초가 지나면 flush)
+    """
+    BATCH_LINES = 10
+    BATCH_SECONDS = 15
+
+    def __init__(self, video_id: int):
+        self.real = sys.stdout
+        self.video_id = video_id
+        self.buf = []
+        self.last_flush = time.monotonic()
+
+    def write(self, s: str):
+        self.real.write(s)
+        for line in s.splitlines():
+            line = line.strip()
+            if line.startswith("["):
+                self.buf.append(line)
+        if self.buf and (len(self.buf) >= self.BATCH_LINES
+                         or time.monotonic() - self.last_flush > self.BATCH_SECONDS):
+            self.flush_to_slack()
+
+    def flush(self):
+        self.real.flush()
+
+    def flush_to_slack(self):
+        if not self.buf:
+            return
+        body = "\n".join(self.buf[-40:])  # 슬랙 메시지 길이 보호
+        self.buf.clear()
+        self.last_flush = time.monotonic()
+        _notify_slack(f"📋 videoId={self.video_id} 진행 로그\n```{body}```")
 
 # 파이프라인 싱글턴 (YOLO 모델을 서버 시작 시 한 번만 로드)
 _pipeline: RallyTrackPipeline | None = None
@@ -98,12 +152,18 @@ def _upload_to_s3(local_path: str, upload_url: str, label: str) -> bool:
         return False
 
     try:
+        # 파일 객체를 그대로 전달해 스트리밍 업로드 (전체를 RAM에 올리지 않음).
+        # Content-Type은 presigned PUT 서명에 포함되므로 반드시 video/mp4로 일치시켜야 함.
+        file_size = os.path.getsize(local_path)
         with open(local_path, "rb") as f:
             response = httpx.put(
                 upload_url,
-                content=f.read(),
-                headers={"Content-Type": "video/mp4"},
-                timeout=180.0,
+                content=f,
+                headers={
+                    "Content-Type": "video/mp4",
+                    "Content-Length": str(file_size),
+                },
+                timeout=httpx.Timeout(10.0, write=600.0, read=120.0),
             )
         if response.status_code in (200, 204):
             print(f"[{label} 업로드] 완료")
@@ -135,10 +195,36 @@ def run_analysis(
     4. skeleton + minimap 영상 S3 업로드
     5. 백엔드 콜백
     """
+    # 동시에 들어온 분석 요청은 순차 처리 (요청 수신 자체는 즉시 응답됨)
+    with _job_semaphore:
+        # 파이프라인의 단계별 print 로그를 Slack으로도 배치 전송
+        step_logger = _SlackStepLogger(video_id)
+        try:
+            with redirect_stdout(step_logger):
+                _run_analysis_locked(
+                    video_id, s3_url, skeleton_upload_url, skeleton_video_url,
+                    minimap_upload_url, minimap_video_url, court_corners, mode,
+                )
+        finally:
+            step_logger.flush_to_slack()
+
+
+def _run_analysis_locked(
+    video_id: int,
+    s3_url: str,
+    skeleton_upload_url: str = "",
+    skeleton_video_url: str = "",
+    minimap_upload_url: str = "",
+    minimap_video_url: str = "",
+    court_corners: Optional[CourtCorners] = None,
+    mode: Literal["pro", "amateur"] = "pro",
+):
     local_path = None
+    started_at = time.monotonic()
 
     try:
         print(f"[분석 시작] videoId={video_id}")
+        _notify_slack(f"🏸 분석 시작 — videoId={video_id}, mode={mode}")
 
         # 1. S3에서 영상 다운로드
         local_path = download_video(s3_url)
@@ -189,23 +275,32 @@ def run_analysis(
         if minimap_video_url:
             callback_data["minimapVideoUrl"] = minimap_video_url
 
-        # 5. 백엔드 콜백 호출
+        # 5. 백엔드 콜백 호출 (공유 시크릿으로 인증)
         response = httpx.post(
             f"{BACKEND_URL}/api/v1/analysis/complete",
             json=callback_data,
+            headers={"X-Internal-Token": CALLBACK_SECRET},
             timeout=30.0,
         )
         print(f"[콜백 완료] videoId={video_id}, status={response.status_code}")
+        elapsed = time.monotonic() - started_at
+        _notify_slack(
+            f"✅ 분석 완료 — videoId={video_id}, "
+            f"hits={api_data.get('total_hits')}, 소요 {elapsed:.0f}초, "
+            f"콜백 status={response.status_code}"
+        )
 
     except Exception as e:
         print(f"[분석 실패] videoId={video_id}, error={e}")
         import traceback
         traceback.print_exc()
+        _notify_slack(f"❌ 분석 실패 — videoId={video_id}\n에러: {e}")
 
         try:
             httpx.post(
                 f"{BACKEND_URL}/api/v1/analysis/fail",
                 json={"videoId": video_id, "error": str(e)},
+                headers={"X-Internal-Token": CALLBACK_SECRET},
                 timeout=10.0,
             )
         except Exception:

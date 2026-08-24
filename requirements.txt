@@ -27,3 +27,10 @@ scipy==1.17.1
 tqdm==4.67.1
 static-ffmpeg==2.7
 ml-collections==0.1.1
+
+# --- TrackNetV3(별도 트리) + ultralytics 추적 런타임 의존성 (2026-08-24 추가) ---
+pycocotools
+parse
+matplotlib
+pillow
+lap
