@@ -1,0 +1,46 @@
+name: AI CI/CD
+
+on:
+  push:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ai-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  verify:
+    name: Verify Python contracts
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Compile Python sources
+        env:
+          PYTHONPYCACHEPREFIX: ${{ runner.temp }}/rallytrack-pyc
+        run: python -m compileall -q analysis config routers services main.py
+      - name: Test analysis contracts
+        run: python -m unittest discover -s tests -v
+
+  deploy:
+    name: Deploy to ML server
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    needs: verify
+    runs-on: [self-hosted, linux, x64, rallytrack-ml]
+    environment: production-ml
+    timeout-minutes: 30
+    steps:
+      - name: Deploy verified revision
+        env:
+          RALLYTRACK_ROOT: ${{ vars.RALLYTRACK_ROOT }}
+        run: |
+          root="${RALLYTRACK_ROOT:-/home/junmin/RallyTrack}"
+          "$root/devops/ml-server/deploy-ai.sh" "$GITHUB_SHA"
