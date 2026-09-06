@@ -41,6 +41,7 @@ from analysis.impact        import ImpactDetector, to_api_json
 from analysis.minimap       import MinimapRenderer
 from analysis.net_judge     import NetCrossingEvent, NetFaultEvent, NetJudge
 from analysis.skeleton_view import SkeletonCourtRenderer
+from services.analysis_mode import get_analysis_mode_profile
 
 
 _stroke_classifier = None
@@ -188,25 +189,8 @@ def _build_feature_inputs_for_event(
     )
 
 
-ANALYSIS_MODE_PROFILES = {
-    "pro": {
-        "tracknet_batch_size": 4,
-        "pose_conf_threshold": 0.3,
-        "pose_model_conf": 0.3,
-        "run_near_miss_rescue": False,
-    },
-    "amateur": {
-        "tracknet_batch_size": 1,
-        "pose_conf_threshold": 0.2,
-        "pose_model_conf": 0.2,
-        "run_near_miss_rescue": True,
-    },
-}
-
-
 def _mode_profile(mode: str) -> tuple[str, dict]:
-    normalized = mode if mode in ANALYSIS_MODE_PROFILES else "pro"
-    return normalized, ANALYSIS_MODE_PROFILES[normalized]
+    return get_analysis_mode_profile(mode)
 
 
 # ────────────────────────────────────────────────────────────
