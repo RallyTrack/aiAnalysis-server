@@ -32,7 +32,7 @@ jobs:
 
   deploy:
     name: Deploy to ML server
-    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    if: vars.ENABLE_CD == 'true' && github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
     needs: verify
     runs-on: [self-hosted, linux, x64, rallytrack-ml]
     environment: production-ml
