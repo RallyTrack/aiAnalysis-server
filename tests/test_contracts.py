@@ -18,6 +18,9 @@ def load_module(name: str, relative_path: str):
 
 
 analysis_mode = load_module("analysis_mode_contract", "services/analysis_mode.py")
+classifier_contract = load_module(
+    "classifier_contract", "services/classifier_contract.py"
+)
 stroke_labels = load_module("stroke_labels_contract", "analysis/stroke_labels.py")
 
 
@@ -66,6 +69,39 @@ class StrokeLabelContractTest(unittest.TestCase):
     def test_unknown_label_is_rejected(self):
         with self.assertRaises(KeyError):
             stroke_labels.map_9_to_6_pro("Unknown")
+
+
+class ClassifierMetadataContractTest(unittest.TestCase):
+    class FakeModel:
+        model_name = "hgb"
+        label_scheme = "9class"
+        class_names = list(stroke_labels.CLASS_NAMES_9)
+        classes_ = [0, 2, 3, 4, 5, 7]
+
+    def test_pro_artifact_reports_six_trained_labels_inside_nine_class_schema(self):
+        contract = classifier_contract.describe_classifier(
+            "pro", self.FakeModel(), vit_available=True
+        )
+
+        self.assertEqual("9class", contract["feature_scheme"])
+        self.assertEqual(6, contract["trained_label_count"])
+        self.assertEqual(
+            ["Serve", "Lob", "Smash", "Drop", "Drive", "Clear"],
+            contract["trained_labels"],
+        )
+        self.assertIn(
+            "scheme=9class trained_labels=6[Serve,Lob,Smash,Drop,Drive,Clear]",
+            classifier_contract.format_classifier_contract(contract),
+        )
+
+    def test_callback_schemes_include_feature_and_vit_results(self):
+        schemes = classifier_contract.collect_stroke_class_schemes([
+            {"stroke_source": "feature_classifier", "stroke_class_scheme": "4class_amateur"},
+            {"stroke_source": "vit_only"},
+            {"stroke_source": None},
+        ])
+
+        self.assertEqual(["4class_amateur", "9class"], schemes)
 
 
 if __name__ == "__main__":

@@ -48,9 +48,10 @@ class _SlackStepLogger:
     BATCH_LINES = 10
     BATCH_SECONDS = 15
 
-    def __init__(self, video_id: int):
+    def __init__(self, video_id: int, mode: str):
         self.real = sys.stdout
         self.video_id = video_id
+        self.mode = mode
         self.buf = []
         self.last_flush = time.monotonic()
 
@@ -73,7 +74,9 @@ class _SlackStepLogger:
         body = "\n".join(self.buf[-40:])  # 슬랙 메시지 길이 보호
         self.buf.clear()
         self.last_flush = time.monotonic()
-        _notify_slack(f"📋 videoId={self.video_id} 진행 로그\n```{body}```")
+        _notify_slack(
+            f"📋 videoId={self.video_id}, analysisMode={self.mode} 진행 로그\n```{body}```"
+        )
 
 # 파이프라인 싱글턴 (YOLO 모델을 서버 시작 시 한 번만 로드)
 _pipeline: RallyTrackPipeline | None = None
@@ -198,7 +201,7 @@ def run_analysis(
     # 동시에 들어온 분석 요청은 순차 처리 (요청 수신 자체는 즉시 응답됨)
     with _job_semaphore:
         # 파이프라인의 단계별 print 로그를 Slack으로도 배치 전송
-        step_logger = _SlackStepLogger(video_id)
+        step_logger = _SlackStepLogger(video_id, mode)
         try:
             with redirect_stdout(step_logger):
                 _run_analysis_locked(
@@ -263,6 +266,8 @@ def _run_analysis_locked(
         # 4. 백엔드 콜백 데이터 구성
         callback_data = {
             "videoId":        video_id,
+            "analysisMode":   api_data.get("analysis_mode", mode),
+            "strokeClassSchemes": api_data.get("stroke_class_schemes", []),
             "videoFps":       api_data["video_fps"],
             "totalHits":      api_data["total_hits"],
             "hitsData":       api_data["hits_data"],
