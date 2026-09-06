@@ -42,6 +42,11 @@ from analysis.minimap       import MinimapRenderer
 from analysis.net_judge     import NetCrossingEvent, NetFaultEvent, NetJudge
 from analysis.skeleton_view import SkeletonCourtRenderer
 from services.analysis_mode import get_analysis_mode_profile
+from services.classifier_contract import (
+    collect_stroke_class_schemes,
+    describe_classifier,
+    format_classifier_contract,
+)
 
 
 _stroke_classifier = None
@@ -89,8 +94,8 @@ def _get_feature_classifier(mode: str):
         from analysis.stroke_feature_classifier import TrainedStrokeModel
         model = TrainedStrokeModel.load(Path(pkl_path))
         print(f"[FeatureClassifier:{key}] loaded "
-              f"{model.model_name}/{model.label_scheme} "
-              f"({len(model.class_names)}-class)")
+              f"model={model.model_name} scheme={model.label_scheme} "
+              f"probability_slots={len(model.class_names)}")
         _feature_classifier_cache[key] = model
         return model
     except Exception as e:
@@ -849,11 +854,15 @@ class RallyTrackPipeline:
         print(f"[Step 4.8] 스트로크 분류 (mode={mode})")
         feature_clf = _get_feature_classifier(mode)
         vit_ensemble = _get_stroke_classifier()  # teacher 겸 fallback
+        print(format_classifier_contract(
+            describe_classifier(mode, feature_clf, vit_ensemble is not None)
+        ))
 
         feature_classified = 0
         if feature_clf is not None and vit_ensemble is not None and hit_events:
-            print(f"           feature classifier ({feature_clf.label_scheme}, "
-                  f"{len(feature_clf.class_names)}-class)")
+            print(f"           feature classifier (model={feature_clf.model_name}, "
+                  f"scheme={feature_clf.label_scheme}, "
+                  f"trained_labels={len(feature_clf.classes_)})")
             df_ball = pd.read_csv(csv_path)
             # 컬럼 통일 — TrackNet CSV 는 'Frame X Y Visibility' (대문자).
             # load_trajectory_csv 는 소문자화하지만 여기선 원본 그대로 사용.
@@ -939,6 +948,7 @@ class RallyTrackPipeline:
                     ev.stroke_type       = result.class_name
                     ev.stroke_confidence = float(result.confidence)
                     ev.stroke_source     = "vit_only"
+                    ev.stroke_class_scheme = "9class"
                     print(f"           #{ev.hit_number:02d} → "
                           f"{result.class_name} ({result.confidence:.2f})")
                 except Exception as exc:
@@ -1299,6 +1309,10 @@ class RallyTrackPipeline:
 
         # ── Step 8: JSON 생성 ─────────────────────────────────
         api_data  = to_api_json(hit_events, fps)
+        api_data["analysis_mode"] = mode
+        api_data["stroke_class_schemes"] = collect_stroke_class_schemes(
+            api_data["hits_data"]
+        )
         api_data["net_fault_events"]  = [e.to_dict() for e in net_fault_events]
         api_data["coordinate_mode"]   = hg["coordinate_mode"]
         api_data["rallyResults"]       = rally_results

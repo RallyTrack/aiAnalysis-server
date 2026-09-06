@@ -65,6 +65,9 @@ aiAnalysis-server/
 - **API Server**: FastAPI
 - **Infra**: AWS S3, FFmpeg
 
+프로/아마추어 모드와 현재 모델의 실제 출력 라벨 계약은
+[`docs/STROKE_CLASS_CONTRACT.md`](docs/STROKE_CLASS_CONTRACT.md)를 참고하세요.
+
 ---
 
 ## API 사용법
